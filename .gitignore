@@ -1,0 +1,4 @@
+.env
+*.txt
+!requirements.txt
+venv/
