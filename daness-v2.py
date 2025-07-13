@@ -1078,6 +1078,29 @@ def recommend_stream_matches(pairings, standings):
         if match["reasons"]:
             print(f"   Storylines: {', '.join(match['reasons'])}")
 
+def get_bracket_standings(bracket_phase):
+    """Get final standings/placements from a bracket phase"""
+    standings = {}
+    
+    # Check standings first
+    for group in bracket_phase.get('phaseGroups', {}).get('nodes', []):
+        if 'standings' in group and group['standings']['nodes']:
+            for standing in group['standings']['nodes']:
+                if standing['entrant'] and standing['entrant']['participants']:
+                    player_name = standing['entrant']['participants'][0]['gamerTag']
+                    placement = standing['placement']
+                    standings[player_name] = placement
+    
+    # If no standings, check seed placements
+    if not standings:
+        for group in bracket_phase.get('phaseGroups', {}).get('nodes', []):
+            for seed in group.get('seeds', {}).get('nodes', []):
+                if seed.get('placement') and seed['entrant'] and seed['entrant']['participants']:
+                    player_name = seed['entrant']['participants'][0]['gamerTag']
+                    placement = seed['placement']
+                    standings[player_name] = placement
+    
+    return standings
 
 def get_bracket_results(bracket_phase):
     """Extract bracket results from a completed bracket phase"""

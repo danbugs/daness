@@ -70,7 +70,7 @@ Then in StartGG:
 # Calculate and update final standings
 python3 daness-v2.py <event-slug> standings
 ```
-This updates the Final Standings phase with correct overall placements. Then finalize the standings in StartGG.
+This updates the Final Standings phase with correct overall placements. Then finalize the standings in StartGG. Don't forget to manually add everybody to the Final Standings phase first!
 
 ## Example Workflow
 
