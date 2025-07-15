@@ -430,22 +430,54 @@ def calculate_swiss_pairings(standings, round_number=None):
         top_half = available[:half_size]
         bottom_half = available[half_size:]
 
+        # Track which players are already paired in this group
+        group_used = set()
+
         # First pass: Try standard Swiss pairings
         for i in range(len(top_half)):
             p1 = top_half[i]
-            if i < len(bottom_half):
-                p2 = bottom_half[i]
+            if p1[0] in group_used:
+                continue
+
+            # Find best match from bottom half
+            best_match = None
+            for p2 in bottom_half:
+                if p2[0] not in group_used and can_pair(p1, p2):
+                    best_match = p2
+                    break
+
+            if best_match:
+                group_pairings.append((p1, best_match))
+                group_used.add(p1[0])
+                group_used.add(best_match[0])
+                print(f"    ✓ {p1[0]} vs {best_match[0]}")
+
+        # Handle any remaining unpaired players within the group
+        remaining = [p for p in available if p[0] not in group_used]
+        while len(remaining) >= 2:
+            p1 = remaining[0]
+            best_match = None
+
+            for p2 in remaining[1:]:
                 if can_pair(p1, p2):
+                    best_match = p2
+                    break
+
+            if best_match:
+                group_pairings.append((p1, best_match))
+                remaining.remove(p1)
+                remaining.remove(best_match)
+                print(f"    ✓ {p1[0]} vs {best_match[0]} [additional pairing]")
+            else:
+                # Force pair if needed
+                if len(remaining) >= 2:
+                    p1 = remaining[0]
+                    p2 = remaining[1]
                     group_pairings.append((p1, p2))
-                    print(f"    ✓ {p1[0]} vs {p2[0]}")
+                    remaining = remaining[2:]
+                    print(f"    ⚠ FORCED: {p1[0]} vs {p2[0]}")
                 else:
-                    # Find alternative pairing
-                    best_match = find_closest_valid_pairing(
-                        p1, [p for p in bottom_half if p[0] not in used], used
-                    )
-                    if best_match:
-                        group_pairings.append((p1, best_match))
-                        print(f"    ✓ {p1[0]} vs {best_match[0]} [rematch avoidance]")
+                    break
 
         return group_pairings
 
@@ -1078,29 +1110,35 @@ def recommend_stream_matches(pairings, standings):
         if match["reasons"]:
             print(f"   Storylines: {', '.join(match['reasons'])}")
 
+
 def get_bracket_standings(bracket_phase):
     """Get final standings/placements from a bracket phase"""
     standings = {}
-    
+
     # Check standings first
-    for group in bracket_phase.get('phaseGroups', {}).get('nodes', []):
-        if 'standings' in group and group['standings']['nodes']:
-            for standing in group['standings']['nodes']:
-                if standing['entrant'] and standing['entrant']['participants']:
-                    player_name = standing['entrant']['participants'][0]['gamerTag']
-                    placement = standing['placement']
+    for group in bracket_phase.get("phaseGroups", {}).get("nodes", []):
+        if "standings" in group and group["standings"]["nodes"]:
+            for standing in group["standings"]["nodes"]:
+                if standing["entrant"] and standing["entrant"]["participants"]:
+                    player_name = standing["entrant"]["participants"][0]["gamerTag"]
+                    placement = standing["placement"]
                     standings[player_name] = placement
-    
+
     # If no standings, check seed placements
     if not standings:
-        for group in bracket_phase.get('phaseGroups', {}).get('nodes', []):
-            for seed in group.get('seeds', {}).get('nodes', []):
-                if seed.get('placement') and seed['entrant'] and seed['entrant']['participants']:
-                    player_name = seed['entrant']['participants'][0]['gamerTag']
-                    placement = seed['placement']
+        for group in bracket_phase.get("phaseGroups", {}).get("nodes", []):
+            for seed in group.get("seeds", {}).get("nodes", []):
+                if (
+                    seed.get("placement")
+                    and seed["entrant"]
+                    and seed["entrant"]["participants"]
+                ):
+                    player_name = seed["entrant"]["participants"][0]["gamerTag"]
+                    placement = seed["placement"]
                     standings[player_name] = placement
-    
+
     return standings
+
 
 def get_bracket_results(bracket_phase):
     """Extract bracket results from a completed bracket phase"""
@@ -1706,7 +1744,7 @@ def main():
 
         # Calculate pairings
         print("Calculating pairings...")
-        pairings = calculate_swiss_pairings(standings)
+        pairings = calculate_swiss_pairings(standings, round_number=target_round)
 
         print(f"\nCalculated {len(pairings)} pairings:")
         for i, ((p1_name, p1_info), (p2_name, p2_info)) in enumerate(pairings, 1):
