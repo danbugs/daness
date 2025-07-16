@@ -136,15 +136,12 @@ def make_request(query, variables, is_mutation=False):
         headers["User-Agent"] = "Python/daness-script"
 
     try:
-        print(f"Making {'mutation' if is_mutation else 'query'} request...")
         response = requests.post(
             url,
             headers=headers,
             json={"query": query, "variables": variables},
             timeout=30,
         )
-
-        print(f"Response received: {response.status_code}")
 
         if response.status_code != 200:
             print(f"Error: {response.status_code}")
@@ -190,16 +187,29 @@ def load_initial_seeding(filename):
     return seeding
 
 
-def get_match_results_from_phases(phases):
+def get_match_results_from_phases(phases, swiss_only=False):
     """Extract all match results from completed phases"""
     all_results = []
 
     for phase in phases:
         phase_state = get_phase_state(phase["state"])
+        phase_name_lower = phase["name"].lower()
+
+        # Skip non-Swiss phases if swiss_only is True
+        if swiss_only:
+            if "bracket" in phase_name_lower or "final" in phase_name_lower:
+                continue
+            # Only include Swiss rounds 1-5
+            if not any(f"round {i}" in phase_name_lower for i in range(1, 6)):
+                continue
 
         if phase_state == 3:  # COMPLETED state
             phase_name = phase["name"]
             round_num = extract_round_number(phase_name)
+
+            # Additional check for Swiss only
+            if swiss_only and round_num > 5:
+                continue
 
             for group in phase["phaseGroups"]["nodes"]:
                 for set_data in group["sets"]["nodes"]:
@@ -211,6 +221,7 @@ def get_match_results_from_phases(phases):
                             "round": round_num,
                             "winner_id": winner_id,
                             "players": [],
+                            "phase_name": phase["name"],  # Add phase name for debugging
                         }
 
                         for slot in set_data["slots"]:
@@ -281,6 +292,89 @@ def calculate_standings(initial_seeding, match_results):
     return standings
 
 
+def get_expected_wins(seed):
+    """Calculate expected wins based on seed"""
+    if seed <= 4:
+        return 4.0 - (seed - 1) * 0.2  # Seeds 1-4: 4.0, 3.8, 3.6, 3.4
+    elif seed <= 8:
+        return 3.5 - (seed - 4) * 0.15  # Seeds 5-8: 3.35, 3.2, 3.05, 2.9
+    elif seed <= 16:
+        return 3.0 - (seed - 8) * 0.1  # Seeds 9-16: 2.9 down to 2.2
+    elif seed <= 24:
+        return 2.2 - (seed - 16) * 0.1  # Seeds 17-24: 2.1 down to 1.4
+    else:
+        return 1.4 - (seed - 24) * 0.05  # Seeds 25-32: 1.35 down to 1.0
+
+
+def get_cinderella_multiplier(seed):
+    """Get Cinderella bonus multiplier based on seed"""
+    if seed <= 8:
+        return 0.5, "minimal (top seed)"
+    elif seed <= 16:
+        return 1.0, "moderate (mid seed)"
+    elif seed <= 24:
+        return 1.5, "good (lower seed)"
+    else:
+        return 2.0, "maximum (bottom seed)"
+
+
+def calculate_cinderella_bonus(seed, wins, standings, match_results, player_name):
+    """Calculate Cinderella bonus for a player"""
+    expected_wins = get_expected_wins(seed)
+    wins_above_expected = wins - expected_wins
+    cinderella_bonus = 0
+
+    # Only award Cinderella bonus for significant overperformance
+    if wins_above_expected > 0.5:
+        multiplier, _ = get_cinderella_multiplier(seed)
+
+        # Calculate bonus based on wins above expected
+        for i in range(int(wins_above_expected)):
+            base_bonus = 3 + i * 2
+            cinderella_bonus += base_bonus * multiplier
+
+        # Handle fractional part
+        fractional_part = wins_above_expected - int(wins_above_expected)
+        if fractional_part > 0:
+            next_bonus = (3 + int(wins_above_expected) * 2) * multiplier
+            cinderella_bonus += fractional_part * next_bonus
+
+        # Special upset bonus
+        upset_bonus = 0
+        for opp_name in standings[player_name]["opponents"]:
+            if opp_name in standings:
+                opp_seed = standings[opp_name]["seed"]
+                seed_diff = seed - opp_seed
+
+                if seed_diff >= 8:
+                    # Check if we actually beat them
+                    for match in match_results:
+                        match_players = [p["name"] for p in match["players"]]
+                        if player_name in match_players and opp_name in match_players:
+                            winner_id = match["winner_id"]
+                            player_id = next(
+                                (
+                                    p["id"]
+                                    for p in match["players"]
+                                    if p["name"] == player_name
+                                ),
+                                None,
+                            )
+                            if player_id == winner_id:
+                                if seed_diff >= 16:
+                                    upset_bonus += 5
+                                elif seed_diff >= 12:
+                                    upset_bonus += 3
+                                else:
+                                    upset_bonus += 2
+                                break
+
+        cinderella_bonus += upset_bonus
+
+    # Cap Cinderella bonus at reasonable level
+    return min(cinderella_bonus, 20.0)
+
+
 def calculate_swiss_pairings(standings, round_number=None):
     """Calculate Swiss pairings with improved rematch avoidance and controlled variance"""
     # Group players by record
@@ -317,7 +411,6 @@ def calculate_swiss_pairings(standings, round_number=None):
     used = set()
 
     # Add controlled randomness based on round number
-    # Use round_number as seed for consistency within a round but variance across weeks
     if round_number and not is_final_round:
         # Create a seed that changes weekly but is consistent within the tournament
         weekly_seed = int(datetime.now().strftime("%Y%W")) + round_number
@@ -368,51 +461,274 @@ def calculate_swiss_pairings(standings, round_number=None):
         if is_final_round and record == (2, 2) and len(available) >= 8:
             print("    🎯 Special final round pairing for 2-2 group")
 
-            # Create balanced pairings for final round
-            temp_pairings = []
-            temp_used = set()
+            # Show constraint matrix for debugging
+            print("\n    Constraint Matrix (X = cannot pair):")
+            print(
+                "    "
+                + " " * 15
+                + " ".join(f"{i:2d}" for i in range(1, len(available) + 1))
+            )
+            for i, (p1_name, p1_info) in enumerate(available):
+                row = f"    {i+1:2d}. {p1_name[:12]:<12} "
+                for j, (p2_name, p2_info) in enumerate(available):
+                    if i == j:
+                        row += " - "
+                    elif p2_name in p1_info["opponents"]:
+                        row += " X "
+                    else:
+                        row += " . "
+                print(row)
 
-            half_size = len(available) // 2
-            for i in range(half_size):
-                p1 = available[i]
-                p2 = available[i + half_size]
+            # Use the improved algorithm
+            from collections import defaultdict, deque
 
-                if can_pair(p1, p2):
-                    temp_pairings.append((p1, p2))
-                    temp_used.add(p1[0])
-                    temp_used.add(p2[0])
-                    print(
-                        f"    ✓ {p1[0]} (seed {p1[1]['seed']}) vs {p2[0]} (seed {p2[1]['seed']})"
+            def find_perfect_matching(players):
+                """Find a perfect matching with no rematches using maximum matching algorithm"""
+                n = len(players)
+                if n % 2 != 0:
+                    return None
+
+                # Build adjacency list of valid pairings
+                adj = defaultdict(set)
+                for i in range(n):
+                    for j in range(i + 1, n):
+                        if can_pair(players[i], players[j]):
+                            adj[i].add(j)
+                            adj[j].add(i)
+
+                # Check if graph is too constrained
+                min_degree = min(len(adj[i]) for i in range(n))
+                if min_degree == 0:
+                    print("    ❌ At least one player has no valid opponents!")
+                    for i in range(n):
+                        if len(adj[i]) == 0:
+                            print(f"       - {players[i][0]} has no valid opponents")
+                    return None
+
+                # Try to find a perfect matching using a more robust algorithm
+                matched = {}
+
+                # Use random restarts to try different initial configurations
+                import random
+
+                best_matching = None
+                best_size = 0
+
+                for attempt in range(10):  # Try 10 different random orderings
+                    temp_matched = {}
+                    temp_used = set()
+
+                    # Random order for this attempt
+                    order = list(range(n))
+                    if attempt > 0:  # Keep first attempt deterministic
+                        random.shuffle(order)
+
+                    for i in order:
+                        if i not in temp_used:
+                            # Find best available partner
+                            best_partner = None
+                            best_score = float("inf")
+
+                            for j in adj[i]:
+                                if j not in temp_used:
+                                    # Score based on seed difference and partner flexibility
+                                    seed_diff = abs(
+                                        players[i][1]["seed"] - players[j][1]["seed"]
+                                    )
+                                    partner_flexibility = len(
+                                        [k for k in adj[j] if k not in temp_used]
+                                    )
+                                    score = seed_diff - partner_flexibility * 0.1
+
+                                    if score < best_score:
+                                        best_score = score
+                                        best_partner = j
+
+                            if best_partner is not None:
+                                temp_matched[i] = best_partner
+                                temp_matched[best_partner] = i
+                                temp_used.add(i)
+                                temp_used.add(best_partner)
+
+                    if len(temp_matched) > best_size:
+                        best_size = len(temp_matched)
+                        best_matching = temp_matched.copy()
+
+                    if best_size == n:  # Found perfect matching
+                        break
+
+                if best_size < n:
+                    # Show who couldn't be matched
+                    unmatched = [
+                        players[i][0] for i in range(n) if i not in best_matching
+                    ]
+                    print(f"    Unmatched players: {', '.join(unmatched)}")
+                    return None
+
+                # Convert to pairs
+                pairs = []
+                seen = set()
+                for i in range(n):
+                    if i not in seen and i in best_matching:
+                        j = best_matching[i]
+                        pairs.append((players[i], players[j]))
+                        seen.add(i)
+                        seen.add(j)
+
+                return pairs
+
+            # For final round 2-2 group, use competitive Swiss pairing
+            # Higher seeds should face lower seeds for fairness
+            print("    Using competitive Swiss pairing for bracket qualification...")
+
+            # Sort by seed
+            available.sort(key=lambda x: x[1]["seed"])
+
+            # Try standard Swiss pairing (top half vs bottom half)
+            half = len(available) // 2
+            top_half = available[:half]
+            bottom_half = available[half:]
+
+            swiss_pairings = []
+            paired = set()
+
+            # First try to pair each top half player with corresponding bottom half
+            for i in range(half):
+                if i not in paired:
+                    # Start with the natural Swiss pairing
+                    p1 = top_half[i]
+                    p2 = bottom_half[i]
+
+                    if can_pair(p1, p2):
+                        swiss_pairings.append((p1, p2))
+                        paired.add(i)
+                        print(
+                            f"    ✓ {p1[0]} (seed {p1[1]['seed']}) vs {p2[0]} (seed {p2[1]['seed']})"
+                        )
+                    else:
+                        # If natural pairing creates rematch, find next best option
+                        paired_p2 = False
+                        for j in range(half):
+                            if j not in paired and j != i:
+                                alt_p2 = bottom_half[j]
+                                if can_pair(p1, alt_p2):
+                                    # Check if the displaced player can be paired
+                                    alt_p1 = top_half[j]
+                                    if can_pair(alt_p1, p2):
+                                        # Swap is valid
+                                        swiss_pairings.append((p1, alt_p2))
+                                        swiss_pairings.append((alt_p1, p2))
+                                        paired.add(i)
+                                        paired.add(j)
+                                        print(
+                                            f"    ✓ {p1[0]} (seed {p1[1]['seed']}) vs {alt_p2[0]} (seed {alt_p2[1]['seed']}) [adjusted]"
+                                        )
+                                        print(
+                                            f"    ✓ {alt_p1[0]} (seed {alt_p1[1]['seed']}) vs {p2[0]} (seed {p2[1]['seed']}) [adjusted]"
+                                        )
+                                        paired_p2 = True
+                                        break
+
+                        if not paired_p2:
+                            # Fallback to perfect matching if Swiss pairing fails
+                            print(
+                                "    ⚠️  Standard Swiss pairing not possible, using fallback..."
+                            )
+                            perfect_matching = find_perfect_matching(available)
+                            if perfect_matching:
+                                print("    Found alternative pairing:")
+                                for p1, p2 in perfect_matching:
+                                    print(
+                                        f"    ✓ {p1[0]} (seed {p1[1]['seed']}) vs {p2[0]} (seed {p2[1]['seed']})"
+                                    )
+                                return perfect_matching
+
+            # If we successfully paired everyone with Swiss method
+            if len(swiss_pairings) == half:
+                print("    ✅ Competitive Swiss pairing successful!")
+                return swiss_pairings
+            else:
+                print("    ⚠️  No perfect matching possible, using fallback algorithm")
+
+                # Fallback algorithm
+                temp_pairings = []
+                temp_used = set()
+                remaining = available[:]
+
+                # Sort by number of valid opponents (least flexible first)
+                def count_valid_opponents(player):
+                    count = 0
+                    for other in remaining:
+                        if (
+                            other[0] != player[0]
+                            and other[0] not in temp_used
+                            and can_pair(player, other)
+                        ):
+                            count += 1
+                    return count
+
+                while len(remaining) >= 2:
+                    # Sort remaining players by flexibility
+                    remaining.sort(
+                        key=lambda p: (count_valid_opponents(p), p[1]["seed"])
                     )
 
-            # Handle any unpaired players due to rematches
-            unpaired = [p for p in available if p[0] not in temp_used]
-            while len(unpaired) >= 2:
-                p1 = unpaired[0]
-                best_match = find_closest_valid_pairing(p1, unpaired[1:], temp_used)
+                    p1 = remaining[0]
+                    best_match = None
+                    best_score = float("inf")
 
-                if best_match:
-                    temp_pairings.append((p1, best_match))
-                    temp_used.add(p1[0])
-                    temp_used.add(best_match[0])
-                    unpaired.remove(p1)
-                    unpaired.remove(best_match)
-                    print(f"    ✓ {p1[0]} vs {best_match[0]} [rematch avoidance]")
-                else:
-                    # Force pair if no valid match
-                    if len(unpaired) >= 2:
-                        p1 = unpaired[0]
-                        p2 = unpaired[1]
-                        temp_pairings.append((p1, p2))
-                        print(f"    ⚠ FORCED: {p1[0]} vs {p2[0]}")
-                        unpaired = unpaired[2:]
+                    # Find best opponent considering both seed proximity and rematch avoidance
+                    for p2 in remaining[1:]:
+                        if can_pair(p1, p2):
+                            seed_diff = abs(p1[1]["seed"] - p2[1]["seed"])
+                            score = seed_diff
+                            if score < best_score:
+                                best_match = p2
+                                best_score = score
 
-            return temp_pairings
+                    if best_match:
+                        temp_pairings.append((p1, best_match))
+                        temp_used.add(p1[0])
+                        temp_used.add(best_match[0])
+                        remaining.remove(p1)
+                        remaining.remove(best_match)
+                        print(f"    ✓ {p1[0]} vs {best_match[0]}")
+                    else:
+                        # Forced rematch - try to minimize impact
+                        print(f"    ⚠️  No valid pairing for {p1[0]}, forcing rematch")
+                        # Pick the opponent they played longest ago
+                        best_rematch = None
+                        earliest_round = float("inf")
+
+                        for p2 in remaining[1:]:
+                            if p2[0] in p1[1]["opponents"]:
+                                # Find when they played
+                                for round_num, opp in enumerate(p1[1]["opponents"]):
+                                    if opp == p2[0] and round_num < earliest_round:
+                                        earliest_round = round_num
+                                        best_rematch = p2
+                                        break
+
+                        if best_rematch:
+                            temp_pairings.append((p1, best_rematch))
+                            remaining.remove(p1)
+                            remaining.remove(best_rematch)
+                            print(
+                                f"    ⚠ FORCED REMATCH: {p1[0]} vs {best_rematch[0]} (played in round {earliest_round + 1})"
+                            )
+                        else:
+                            # Last resort: pair with anyone
+                            p2 = remaining[1]
+                            temp_pairings.append((p1, p2))
+                            remaining.remove(p1)
+                            remaining.remove(p2)
+                            print(f"    ⚠ FORCED: {p1[0]} vs {p2[0]}")
+
+                return temp_pairings
 
         # For non-final rounds, add controlled variance
         if not is_final_round and group_size >= 8:
             # Shuffle within small seed ranges to add variance
-            # This maintains competitive balance while preventing repetitive pairings
             chunk_size = 4  # Group players in chunks of 4 by seed
             shuffled_available = []
 
@@ -425,29 +741,55 @@ def calculate_swiss_pairings(standings, round_number=None):
             available = shuffled_available
             print(f"    Added pairing variance for {record[0]}-{record[1]} group")
 
-        # Standard Swiss pairing with variance
-        half_size = len(available) // 2
-        top_half = available[:half_size]
-        bottom_half = available[half_size:]
+        # Standard Swiss pairing with better rematch handling
+        temp_pairings = []
+        temp_used = set()
+        remaining = available[:]
 
-        # First pass: Try standard Swiss pairings
-        for i in range(len(top_half)):
-            p1 = top_half[i]
-            if i < len(bottom_half):
-                p2 = bottom_half[i]
+        # For standard rounds, use a more flexible algorithm
+        while len(remaining) >= 2:
+            # Take the highest seeded unpaired player
+            p1 = remaining[0]
+
+            # Find valid opponents
+            valid_opponents = []
+            for p2 in remaining[1:]:
                 if can_pair(p1, p2):
-                    group_pairings.append((p1, p2))
-                    print(f"    ✓ {p1[0]} vs {p2[0]}")
-                else:
-                    # Find alternative pairing
-                    best_match = find_closest_valid_pairing(
-                        p1, [p for p in bottom_half if p[0] not in used], used
-                    )
-                    if best_match:
-                        group_pairings.append((p1, best_match))
-                        print(f"    ✓ {p1[0]} vs {best_match[0]} [rematch avoidance]")
+                    valid_opponents.append(p2)
 
-        return group_pairings
+            if valid_opponents:
+                # Prefer opponents from the "other half" for Swiss balance
+                half_point = len(remaining) // 2
+                ideal_opponent_idx = half_point
+
+                # Find closest valid opponent to ideal position
+                best_match = None
+                best_distance = float("inf")
+
+                for p2 in valid_opponents:
+                    p2_idx = remaining.index(p2)
+                    distance = abs(p2_idx - ideal_opponent_idx)
+                    if distance < best_distance:
+                        best_match = p2
+                        best_distance = distance
+
+                if best_match:
+                    temp_pairings.append((p1, best_match))
+                    remaining.remove(p1)
+                    remaining.remove(best_match)
+                    print(f"    ✓ {p1[0]} vs {best_match[0]}")
+            else:
+                # No valid pairing - this should be very rare
+                print(f"    ⚠️  No valid opponent for {p1[0]}")
+                if len(remaining) >= 2:
+                    # Force pair with next player
+                    p2 = remaining[1]
+                    temp_pairings.append((p1, p2))
+                    remaining.remove(p1)
+                    remaining.remove(p2)
+                    print(f"    ⚠ FORCED: {p1[0]} vs {p2[0]}")
+
+        return temp_pairings
 
     # Process each score group
     for record, players in sorted_groups:
@@ -694,43 +1036,10 @@ def calculate_final_standings_points_based(initial_seeding, match_results):
                             loss_penalty = (total_players - opp_base_points + 1) * 0.05
                             loss_points -= loss_penalty
 
-        # Cinderella run bonus
-        cinderella_bonus = 0
-        seed = info["seed"]
-        wins = info["wins"]
-
-        # Expected performance based on seeding
-        if seed <= 2:
-            expected_wins = 4.0
-        elif seed <= 4:
-            expected_wins = 3.8
-        elif seed <= 8:
-            expected_wins = 3.2
-        elif seed <= 12:
-            expected_wins = 2.8
-        elif seed <= 16:
-            expected_wins = 2.5
-        elif seed <= 20:
-            expected_wins = 2.0
-        elif seed <= 24:
-            expected_wins = 1.8
-        elif seed <= 28:
-            expected_wins = 1.5
-        else:
-            expected_wins = 1.0
-
-        # Progressive bonus for exceeding expectations
-        wins_above_expected = wins - expected_wins
-        if wins_above_expected > 0.5:
-            seed_multiplier = max(1.0, (total_players - seed) / 16)
-
-            for i in range(int(wins_above_expected)):
-                cinderella_bonus += (3 + i * 2) * seed_multiplier
-
-            fractional_part = wins_above_expected - int(wins_above_expected)
-            if fractional_part > 0.5:
-                next_bonus = (3 + int(wins_above_expected) * 2) * seed_multiplier
-                cinderella_bonus += fractional_part * next_bonus
+        # Calculate Cinderella bonus
+        cinderella_bonus = calculate_cinderella_bonus(
+            info["seed"], info["wins"], standings, match_results, player_name
+        )
 
         # Total score
         total_score = (
@@ -740,6 +1049,9 @@ def calculate_final_standings_points_based(initial_seeding, match_results):
             + loss_points
             + cinderella_bonus
         )
+
+        expected_wins = get_expected_wins(info["seed"])
+        wins_above_expected = info["wins"] - expected_wins
 
         final_standings.append(
             {
@@ -1078,93 +1390,37 @@ def recommend_stream_matches(pairings, standings):
         if match["reasons"]:
             print(f"   Storylines: {', '.join(match['reasons'])}")
 
+
 def get_bracket_standings(bracket_phase):
     """Get final standings/placements from a bracket phase"""
     standings = {}
-    
+
     # Check standings first
-    for group in bracket_phase.get('phaseGroups', {}).get('nodes', []):
-        if 'standings' in group and group['standings']['nodes']:
-            for standing in group['standings']['nodes']:
-                if standing['entrant'] and standing['entrant']['participants']:
-                    player_name = standing['entrant']['participants'][0]['gamerTag']
-                    placement = standing['placement']
+    for group in bracket_phase.get("phaseGroups", {}).get("nodes", []):
+        if "standings" in group and group["standings"]["nodes"]:
+            for standing in group["standings"]["nodes"]:
+                if standing["entrant"] and standing["entrant"]["participants"]:
+                    player_name = standing["entrant"]["participants"][0]["gamerTag"]
+                    placement = standing["placement"]
                     standings[player_name] = placement
-    
+
     # If no standings, check seed placements
     if not standings:
-        for group in bracket_phase.get('phaseGroups', {}).get('nodes', []):
-            for seed in group.get('seeds', {}).get('nodes', []):
-                if seed.get('placement') and seed['entrant'] and seed['entrant']['participants']:
-                    player_name = seed['entrant']['participants'][0]['gamerTag']
-                    placement = seed['placement']
+        for group in bracket_phase.get("phaseGroups", {}).get("nodes", []):
+            for seed in group.get("seeds", {}).get("nodes", []):
+                if (
+                    seed.get("placement")
+                    and seed["entrant"]
+                    and seed["entrant"]["participants"]
+                ):
+                    player_name = seed["entrant"]["participants"][0]["gamerTag"]
+                    placement = seed["placement"]
                     standings[player_name] = placement
-    
+
     return standings
 
+
 def get_bracket_results(bracket_phase):
-    """Extract bracket results from a completed bracket phase"""
-    if get_phase_state(bracket_phase["state"]) != 3:
-        print(f"⚠️  {bracket_phase['name']} is not completed yet")
-        return {}
-
-    bracket_results = {}
-    match_count = {}  # Track how many times we've seen each match
-
-    for group in bracket_phase["phaseGroups"]["nodes"]:
-        for set_data in group["sets"]["nodes"]:
-            if get_phase_state(set_data["state"]) == 3 and set_data.get("winnerId"):
-                # Create a unique match key to avoid counting the same match multiple times
-                player_ids = []
-                for slot in set_data["slots"]:
-                    if slot["entrant"]:
-                        player_ids.append(slot["entrant"]["id"])
-
-                if len(player_ids) == 2:
-                    match_key = tuple(sorted(player_ids))
-
-                    # Skip if we've already processed this match
-                    if match_key in match_count:
-                        continue
-                    match_count[match_key] = 1
-
-                    # Process the match
-                    for slot in set_data["slots"]:
-                        if slot["entrant"]:
-                            player_name = slot["entrant"]["participants"][0]["gamerTag"]
-                            player_id = slot["entrant"]["id"]
-
-                            if player_name not in bracket_results:
-                                bracket_results[player_name] = {
-                                    "wins": 0,
-                                    "losses": 0,
-                                    "final_round": 0,
-                                    "eliminated_by": None,
-                                }
-
-                            if player_id == set_data["winnerId"]:
-                                bracket_results[player_name]["wins"] += 1
-                                bracket_results[player_name]["final_round"] = max(
-                                    bracket_results[player_name]["final_round"],
-                                    set_data.get("round", 0),
-                                )
-                            else:
-                                bracket_results[player_name]["losses"] += 1
-                                # Find who eliminated them
-                                for other_slot in set_data["slots"]:
-                                    if (
-                                        other_slot["entrant"]
-                                        and other_slot["entrant"]["id"]
-                                        == set_data["winnerId"]
-                                    ):
-                                        bracket_results[player_name][
-                                            "eliminated_by"
-                                        ] = other_slot["entrant"]["participants"][0][
-                                            "gamerTag"
-                                        ]
-                                        break
-
-    return bracket_results
     """Extract bracket results from a completed bracket phase"""
     if get_phase_state(bracket_phase["state"]) != 3:
         print(f"⚠️  {bracket_phase['name']} is not completed yet")
@@ -1544,10 +1800,242 @@ def update_final_standings_phase(phases, final_tournament_standings, initial_see
         return False
 
 
+def analyze_player_pairings(player_name, initial_seeding, detailed_phases):
+    """Analyze why a specific player was paired with their opponents"""
+    print(f"\n{'='*60}")
+    print(f"PAIRING ANALYSIS FOR: {player_name}")
+    print(f"{'='*60}")
+
+    # Find player's initial seed
+    player_seed = initial_seeding.get(player_name)
+    if not player_seed:
+        print(f"❌ Player '{player_name}' not found in initial seeding")
+        return
+
+    print(f"\nInitial seed: #{player_seed}")
+
+    # Separate Swiss and bracket matches
+    swiss_matches = []
+    bracket_matches = []
+
+    # Track which phase each match came from
+    for phase in detailed_phases:
+        if get_phase_state(phase["state"]) != 3:  # Only completed phases
+            continue
+
+        phase_name = phase["name"].lower()
+        is_swiss = "round" in phase_name and any(
+            str(i) in phase_name for i in range(1, 6)
+        )
+        is_bracket = "bracket" in phase_name
+
+        if not (is_swiss or is_bracket):
+            continue
+
+        # Extract round number for Swiss
+        round_num = extract_round_number(phase["name"]) if is_swiss else None
+
+        # Get matches from this phase
+        for group in phase["phaseGroups"]["nodes"]:
+            for set_data in group["sets"]["nodes"]:
+                if get_phase_state(set_data["state"]) == 3 and set_data["winnerId"]:
+                    # Check if player is in this match
+                    player_in_match = False
+                    opponent = None
+                    won = False
+
+                    for slot in set_data["slots"]:
+                        if slot["entrant"] and slot["entrant"]["participants"]:
+                            name = slot["entrant"]["participants"][0]["gamerTag"]
+                            if name == player_name:
+                                player_in_match = True
+                                won = slot["entrant"]["id"] == set_data["winnerId"]
+
+                    if player_in_match:
+                        # Find opponent
+                        for slot in set_data["slots"]:
+                            if slot["entrant"] and slot["entrant"]["participants"]:
+                                name = slot["entrant"]["participants"][0]["gamerTag"]
+                                if name != player_name:
+                                    opponent = name
+                                    break
+
+                        if opponent:
+                            match_info = {
+                                "opponent": opponent,
+                                "won": won,
+                                "opponent_seed": initial_seeding.get(opponent, 0),
+                                "phase": phase["name"],
+                            }
+
+                            if is_swiss:
+                                match_info["round"] = round_num
+                                swiss_matches.append(match_info)
+                            else:
+                                match_info["bracket_round"] = set_data.get("round", 0)
+                                bracket_matches.append(match_info)
+
+    # Sort Swiss matches by round
+    swiss_matches.sort(key=lambda x: x["round"])
+
+    # Display Swiss match history
+    print(f"\n{'SWISS ROUNDS (1-5)'}")
+    print(f"{'Round':<8} {'Opponent':<20} {'Seed':<6} {'Result':<8} {'Record'}")
+    print("-" * 60)
+
+    swiss_wins = 0
+    swiss_losses = 0
+    for match in swiss_matches:
+        if match["won"]:
+            swiss_wins += 1
+            result = "WIN ✓"
+        else:
+            swiss_losses += 1
+            result = "LOSS ✗"
+
+        record = f"{swiss_wins}-{swiss_losses}"
+        print(
+            f"Round {match['round']:<2} {match['opponent']:<20} "
+            f"#{match['opponent_seed']:<4} {result:<8} {record}"
+        )
+
+    final_swiss_record = f"{swiss_wins}-{swiss_losses}"
+
+    # Bracket seeding calculation
+    print(f"\n{'BRACKET SEEDING CALCULATION'}")
+    print("=" * 60)
+
+    # Get ONLY Swiss results (rounds 1-5)
+    swiss_match_results = get_match_results_from_phases(
+        detailed_phases, swiss_only=True
+    )
+    swiss_only_results = [m for m in swiss_match_results if m["round"] <= 5]
+
+    final_standings = calculate_final_standings_points_based(
+        initial_seeding, swiss_only_results
+    )
+
+    # Find player's position
+    player_standing = next(
+        (p for p in final_standings if p["name"] == player_name), None
+    )
+
+    if player_standing:
+        print(f"\nPOINTS BREAKDOWN:")
+        print("─" * 40)
+
+        # Base points
+        print(
+            f"Base Points (seed #{player_seed}): {player_standing['base_points']:.1f}"
+        )
+
+        # Win quality
+        print(f"Win Quality: +{player_standing['win_points']:.1f}")
+
+        # Loss quality
+        print(f"Loss Quality: {player_standing['loss_points']:.1f}")
+
+        # Cinderella bonus calculation with details
+        expected_wins = get_expected_wins(player_seed)
+        actual_wins_above = swiss_wins - expected_wins
+
+        print(f"\nCINDERELLA BONUS CALCULATION:")
+        print(f"  Expected wins for seed #{player_seed}: {expected_wins:.1f}")
+        print(f"  Actual Swiss wins: {swiss_wins}")
+        print(f"  Overperformance: {actual_wins_above:.1f} wins")
+
+        if actual_wins_above > 0.5:
+            multiplier, desc = get_cinderella_multiplier(player_seed)
+            print(f"  Multiplier: {multiplier}x ({desc})")
+
+            # Show any major upsets
+            upset_count = 0
+            for match in swiss_matches:
+                if match["won"]:
+                    seed_diff = player_seed - match["opponent_seed"]
+                    if seed_diff >= 16:
+                        print(
+                            f"  🌟 HUGE upset vs {match['opponent']} (#{match['opponent_seed']})"
+                        )
+                        upset_count += 1
+                    elif seed_diff >= 12:
+                        print(
+                            f"  ⭐ Big upset vs {match['opponent']} (#{match['opponent_seed']})"
+                        )
+                        upset_count += 1
+                    elif seed_diff >= 8:
+                        print(
+                            f"  ✨ Upset vs {match['opponent']} (#{match['opponent_seed']})"
+                        )
+                        upset_count += 1
+
+            print(
+                f"  Total Cinderella Bonus: +{player_standing['cinderella_bonus']:.1f}"
+            )
+        else:
+            print(f"  No Cinderella bonus (need >0.5 wins above expected)")
+
+        # Win points
+        print(f"\nWin Points: {swiss_wins} × 100 = {swiss_wins * 100}")
+
+        # Total
+        print(f"\n{'─' * 40}")
+        print(f"TOTAL SCORE: {player_standing['total_score']:.1f}")
+
+        overall_rank = final_standings.index(player_standing) + 1
+        print(f"\nFinal Swiss Rank: #{overall_rank} of {len(final_standings)}")
+
+        if overall_rank <= 16:
+            print("→ MAIN BRACKET (Top 16)")
+            bracket_seed = overall_rank
+        else:
+            print("→ REDEMPTION BRACKET (Bottom 16)")
+            bracket_seed = overall_rank - 16
+
+        print(f"→ Bracket seed: #{bracket_seed}")
+
+    # Display bracket matches if any
+    if bracket_matches:
+        print(f"\n{'BRACKET MATCHES'}")
+        print("=" * 60)
+
+        # Determine which bracket
+        bracket_type = "Unknown"
+        for match in bracket_matches:
+            if "main" in match["phase"].lower():
+                bracket_type = "Main Bracket"
+                break
+            elif "redemption" in match["phase"].lower():
+                bracket_type = "Redemption Bracket"
+                break
+
+        print(f"{bracket_type}:")
+        print(f"{'Round':<8} {'Opponent':<20} {'Seed':<6} {'Result'}")
+        print("-" * 50)
+
+        for match in bracket_matches:
+            result = "WIN ✓" if match["won"] else "LOSS ✗"
+            # Handle negative rounds for losers bracket
+            bracket_round = match["bracket_round"]
+            if bracket_round < 0:
+                round_text = f"L{abs(bracket_round)}"
+            elif bracket_round > 0:
+                round_text = f"W{bracket_round}"
+            else:
+                round_text = "?"
+
+            print(
+                f"{round_text:<8} {match['opponent']:<20} "
+                f"#{match['opponent_seed']:<4} {result}"
+            )
+
+
 def main():
     try:
         if len(sys.argv) < 2:
-            print("Usage: python daness-v2.py <event-slug> [round|bracket|standings]")
+            print(
+                "Usage: python daness-v2.py <event-slug> [round|bracket|standings|why]"
+            )
             print(
                 "Example: python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2"
             )
@@ -1560,13 +2048,15 @@ def main():
             print(
                 "         python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2 standings"
             )
+            print(
+                "         python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2 why <player-name>"
+            )
             sys.exit(1)
 
         slug = sys.argv[1]
         command = sys.argv[2] if len(sys.argv) > 2 else None
 
         print(f"Fetching basic event data for: {slug}")
-        print(f"Command: {command}")
 
         # Get basic phases info
         data = make_request(PHASES_QUERY, {"slug": slug})
@@ -1592,12 +2082,9 @@ def main():
             )
             print(f"  - {phase['name']} (state: {state_name})")
 
-        print("Fetching detailed phase data...")
-
         # Get detailed data for each phase
         detailed_phases = []
         for phase in phases:
-            print(f"Getting details for phase: {phase['name']}")
             phase_data = make_request(PHASE_DETAILS_QUERY, {"phaseId": phase["id"]})
             if phase_data and "data" in phase_data and phase_data["data"]["phase"]:
                 detailed_phase = phase_data["data"]["phase"]
@@ -1626,21 +2113,24 @@ def main():
         initial_seeding = load_initial_seeding(seeding_file)
         print(f"Loaded initial seeding for {len(initial_seeding)} players")
 
-        # Get all match results
-        match_results = get_match_results_from_phases(detailed_phases)
-        print(f"Found {len(match_results)} completed matches")
-
         # Handle bracket generation command
         if command == "bracket":
+            match_results = get_match_results_from_phases(
+                detailed_phases, swiss_only=True
+            )
+
             print("Generating bracket seeding...")
             final_standings = calculate_final_standings_points_based(
                 initial_seeding, match_results
             )
-            main_bracket, redemption_bracket = generate_bracket_seeding(final_standings)
+            generate_bracket_seeding(final_standings)
             return
 
         # Handle final standings command
         if command == "standings":
+            match_results = get_match_results_from_phases(
+                detailed_phases, swiss_only=False
+            )
             print("Calculating final tournament standings...")
             final_tournament_standings = calculate_final_tournament_standings(
                 initial_seeding, match_results, detailed_phases
@@ -1657,6 +2147,26 @@ def main():
                     )
                 else:
                     print("\n⚠️  Final standings calculated but phase update failed")
+            return
+
+        if command == "why":
+            if len(sys.argv) < 4:
+                print("Usage: python daness-v2.py <event-slug> why <player-name>")
+                sys.exit(1)
+
+            player_name = " ".join(sys.argv[3:])  # Handle names with spaces
+            print(f"Analyzing pairings for: {player_name}")
+
+            # Load initial seeding
+            seeding_file = f"{slug.replace('/', '-')}-seeding.txt"
+            if not os.path.exists(seeding_file):
+                print(f"❌ No seeding file found. Run the tool without commands first.")
+                sys.exit(1)
+
+            initial_seeding = load_initial_seeding(seeding_file)
+
+            # Analyze the player
+            analyze_player_pairings(player_name, initial_seeding, detailed_phases)
             return
 
         # Handle round-specific updates
@@ -1701,12 +2211,13 @@ def main():
 
         # Calculate standings
         print("Calculating standings...")
+        match_results = get_match_results_from_phases(detailed_phases, swiss_only=True)
         standings = calculate_standings(initial_seeding, match_results)
         print(f"Calculated standings for {len(standings)} players")
 
         # Calculate pairings
         print("Calculating pairings...")
-        pairings = calculate_swiss_pairings(standings)
+        pairings = calculate_swiss_pairings(standings, round_number=target_round)
 
         print(f"\nCalculated {len(pairings)} pairings:")
         for i, ((p1_name, p1_info), (p2_name, p2_info)) in enumerate(pairings, 1):
