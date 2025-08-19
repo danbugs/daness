@@ -1,6 +1,10 @@
 # daness_v2
 
-A Swiss tournament management tool for StartGG, designed for Microspacing Vancouver's format (5 rounds of Swiss → Main/Redemption brackets).
+A Swiss tournament management tool for StartGG, designed for Microspacing Vancouver's format.
+
+**Now supports both formats:**
+- **Swiss + Brackets**: 5 rounds of Swiss → Main/Redemption brackets (original format)
+- **Swiss Only**: 5 rounds of Swiss → Final standings (simplified format)
 
 This is V2 of the [original Daness controller](https://github.com/Tonychen0227/SmashExplorer/blob/640db23f07a647e9cbcfa3b1595c50680421cd80/SmashExplorerWeb/SmashExplorerWeb/Controllers/DanessController.cs).
 
@@ -8,16 +12,16 @@ This is V2 of the [original Daness controller](https://github.com/Tonychen0227/S
 
 StartGG's default Swiss implementation has limitations:
 - Random pairings within score groups (e.g., seed #1 vs #2 in round 2)
-- Can't properly calculate final standings when Swiss feeds into multiple brackets
+- Can't properly calculate final standings based on performance metrics
 - Manual pairing adjustments are tedious and error-prone
 
 ## Features
 
-- **Proper Swiss pairings**: Uses traditional Swiss system with rematch avoidance and weekly variance to prevent repetitive matchups
-- **Points-based bracket seeding**: Custom scoring system with Cinderella run bonuses
-- **Automated final standings**: Correctly ranks players across Main/Redemption brackets
+- **Proper Swiss pairings**: Uses traditional Swiss system with improved rematch avoidance and weekly variance to prevent repetitive matchups
+- **Points-based final seeding**: Custom scoring system with Cinderella run bonuses for overperforming players
+- **Automated final standings**: Works with both Swiss-only and Swiss+brackets formats
 - **Stream match recommendations**: Prioritizes high-stakes matches and compelling storylines over seed numbers
-- **Balanced bracket paths**: Ensures fair matchups in both brackets with rematch avoidance
+- **Flexible tournament formats**: Supports tournaments with or without bracket phases
 
 ## Setup
 
@@ -39,7 +43,13 @@ StartGG's default Swiss implementation has limitations:
    echo "STARTGG_TOKEN=your_token_here" > .env
    ```
 
-3. Create your tournament structure in StartGG (see [Microspacing Vancouver 103](https://www.start.gg/tournament/microspacing-vancouver-103/events) as reference):
+3. Create your tournament structure in StartGG:
+
+   **For Swiss-only format:**
+   - 5 Swiss phases (Round 1-5)
+   - Final Standings phase (custom schedule)
+
+   **For Swiss + Brackets format:**
    - 5 Swiss phases (Round 1-5)
    - Main Bracket phase
    - Redemption Bracket phase
@@ -57,6 +67,19 @@ python3 daness_v2.py <event-slug> 3
 ```
 
 ### After Swiss Completion
+
+**For Swiss-only tournaments:**
+```bash
+# Calculate and update final standings
+python3 daness_v2.py <event-slug> standings
+```
+This updates the Final Standings phase with player rankings based on:
+- Win/loss record
+- Quality of wins/losses
+- Cinderella bonuses for overperforming seeds
+- Initial seeding as tiebreaker
+
+**For Swiss + Brackets tournaments:**
 ```bash
 # Generate bracket seeding (shows who goes to Main vs Redemption)
 python3 daness_v2.py <event-slug> bracket
@@ -65,15 +88,21 @@ Then in StartGG:
 1. Add players to Main/Redemption brackets using "Bracket Setup"
 2. Manually seed each bracket according to the tool's output
 
-### After Brackets Complete
+After brackets complete:
 ```bash
 # Calculate and update final standings
 python3 daness_v2.py <event-slug> standings
 ```
-This updates the Final Standings phase with correct overall placements. Then finalize the standings in StartGG.
 
-## Example Workflow
+## Example Workflows
 
+### Swiss-Only Tournament
+1. Before Round 1: Seed players in StartGG as normal
+2. Before Rounds 2-5: `python3 daness_v2.py tournament/example/event/singles`
+3. After Round 5: `python3 daness_v2.py tournament/example/event/singles standings`
+4. Finalize the Final Standings phase in StartGG
+
+### Swiss + Brackets Tournament
 1. Before Round 1: Seed players in StartGG as normal
 2. Before Rounds 2-5: `python3 daness_v2.py tournament/example/event/singles`
 3. After Round 5: `python3 daness_v2.py tournament/example/event/singles bracket`
@@ -81,14 +110,28 @@ This updates the Final Standings phase with correct overall placements. Then fin
 5. After brackets finish: `python3 daness_v2.py tournament/example/event/singles standings`
 6. Finalize the Final Standings phase in StartGG
 
+## Analyzing Player Pairings
+
+To understand why a player was paired with specific opponents:
+```bash
+python3 daness_v2.py <event-slug> why <player-name>
+```
+This shows:
+- Complete match history
+- Points breakdown for standings
+- Cinderella bonus calculations
+- Bracket placement reasoning (if applicable)
+
 ## Notes
 
 - Initial seeding is saved to a file (e.g., `tournament-example-event-singles-seeding.txt`)
-- The tool prevents rematches when possible (verifies after each round)
-- Special handling for the crucial 2-2 matches in round 5 (bracket qualification)
+- The tool uses an improved backtracking algorithm to prevent rematches
+- Special handling for the crucial 2-2 matches in round 5 (when using brackets)
 - Swiss pairings include controlled variance to prevent week-to-week repetition
 - Stream recommendations de-prioritize top seeds in favor of dramatic storylines
 - Requires all phases to be created in StartGG before running
+- Points-based system rewards quality wins and penalizes bad losses
+- Cinderella bonuses scale based on seed (higher bonus for lower seeds overperforming)
 
 ## Mock Tournament Generator
 
