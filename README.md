@@ -1,197 +1,113 @@
 # daness_v2
 
-A Swiss tournament management tool for StartGG, designed for Microspacing Vancouver's format.
-
-**Now supports both formats:**
-- **Swiss + Brackets**: 5 rounds of Swiss → Main/Redemption brackets (original format)
-- **Swiss Only**: 5 rounds of Swiss → Final standings (simplified format)
+Swiss tournament automation for StartGG. Supports variable player counts. Made for Microspacing Vancouver.
 
 This is V2 of the [original Daness controller](https://github.com/Tonychen0227/SmashExplorer/blob/640db23f07a647e9cbcfa3b1595c50680421cd80/SmashExplorerWeb/SmashExplorerWeb/Controllers/DanessController.cs).
 
-## Why This Tool?
+## Quick Reference
 
-StartGG's default Swiss implementation has limitations:
-- Random pairings within score groups (e.g., seed #1 vs #2 in round 2)
-- Can't properly calculate final standings based on performance metrics
-- Manual pairing adjustments are tedious and error-prone
+### Pairing Algorithm
 
-## Features
+**Round 1:** Seed-based (seed 1 vs seed N/2+1, seed 2 vs N/2+2, etc.)
 
-- **Proper Swiss pairings**: Uses traditional Swiss system with improved rematch avoidance and weekly variance to prevent repetitive matchups
-- **Points-based final seeding**: Custom scoring system with Cinderella run bonuses for overperforming players
-- **Automated final standings**: Works with both Swiss-only and Swiss+brackets formats
-- **Stream match recommendations**: Prioritizes high-stakes matches and compelling storylines over seed numbers
-- **Flexible tournament formats**: Supports tournaments with or without bracket phases
+**Round 2+:** 
+1. Group players by W-L record
+2. Apply date-based randomness (seed: YYYYMMDD) for weekly variance
+3. Within groups: pair by seed ± small random offset
+4. Backtracking ensures zero rematches
+5. Quality checks prevent close-seed matchups in early rounds (1v2, 2v3, etc.)
+6. Power-of-2: strict within-group pairing
+7. Non-power-of-2: allows cross-group pairing when needed
+
+**Scoring:** Points = (Wins × 100) + Base seed points + Win quality + Cinderella bonus  
+**Cinderella:** Lower seeds get higher multipliers for overperformance
+
+### Commands
+
+```bash
+# Recommend Swiss rounds for player count
+python daness_v2.py <event-slug> recommend <num-players>
+# Example: 28 players → 5 rounds, 16 players → 4 rounds
+
+# Setup next unstarted round (autodetect)
+python daness_v2.py <event-slug>
+
+# Or specify a round number
+python daness_v2.py <event-slug> <round-number>
+
+# Calculate Swiss final standings
+python daness_v2.py <event-slug> standings
+
+# Generate bracket split (after all Swiss rounds)
+python daness_v2.py <event-slug> bracket
+# Splits 50/50: 32→16/16, 28→14/14, 24→12/12
+
+# Analyze player pairings
+python daness_v2.py <event-slug> why <player-name>
+```
 
 ## Setup
 
-1. Clone the repository and set up Python environment:
-   ```bash
-   git clone https://github.com/danbugs/daness
-   cd daness
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-
-2. Set your StartGG API token:
-   ```bash
-   # Option 1: Environment variable
-   export STARTGG_TOKEN="your_token_here"
-   
-   # Option 2: Create a .env file
-   echo "STARTGG_TOKEN=your_token_here" > .env
-   ```
-
-3. Create your tournament structure in StartGG:
-
-   **For Swiss-only format:**
-   - 5 Swiss phases (Round 1-5)
-   - Final Standings phase (custom schedule)
-
-   **For Swiss + Brackets format:**
-   - 5 Swiss phases (Round 1-5)
-   - Main Bracket phase
-   - Redemption Bracket phase
-   - Final Standings phase (custom schedule)
-
-## Usage
-
-### Running Swiss Rounds
 ```bash
-# Auto-detect next unstarted round
-python3 daness_v2.py <event-slug>
+git clone https://github.com/danbugs/daness
+cd daness
+python3 -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 
-# Specify a specific round
-python3 daness_v2.py <event-slug> 3
+# Set API token
+export STARTGG_TOKEN="your_token_here"
+# Or create .env file: echo "STARTGG_TOKEN=your_token" > .env
 ```
 
-### After Swiss Completion
+## StartGG Structure
 
-**For Swiss-only tournaments:**
-```bash
-# Calculate and update final standings
-python3 daness_v2.py <event-slug> standings
-```
-This updates the Final Standings phase with player rankings based on:
-- Win/loss record
-- Quality of wins/losses
-- Cinderella bonuses for overperforming seeds
-- Initial seeding as tiebreaker
+**Swiss + Brackets:**
+- Swiss phases (Round 1-N, where N = recommended rounds)
+- Main Bracket phase
+- Redemption Bracket phase  
+- Final Standings phase (custom schedule)
 
-**For Swiss + Brackets tournaments:**
-```bash
-# Generate bracket seeding (shows who goes to Main vs Redemption)
-python3 daness_v2.py <event-slug> bracket
-```
-Then in StartGG:
-1. Add players to Main/Redemption brackets using "Bracket Setup"
-2. Manually seed each bracket according to the tool's output
+**Swiss Only:**
+- Swiss phases (Round 1-N)
+- Final Standings phase (custom schedule)
 
-After brackets complete:
-```bash
-# Calculate and update final standings
-python3 daness_v2.py <event-slug> standings
-```
+## Tournament Flow
 
-## Example Workflows
+1. Seed players in Round 1 phase manually
+2. `python daness_v2.py <slug> recommend <count>` - get recommended rounds
+3. `python daness_v2.py <slug> 1` - setup Round 1 pairings
+4. Start Round 1 in StartGG, complete matches
+5. `python daness_v2.py <slug> 2` - setup Round 2 (uses results from R1)
+6. Repeat for rounds 3-5
+7. `python daness_v2.py <slug> bracket` - generate bracket seeding
+8. Manually seed bracket phases with displayed seeding
+9. Run brackets
+10. `python daness_v2.py <slug> standings` - update Final Standings phase
 
-### Swiss-Only Tournament
-1. Before Round 1: Seed players in StartGG as normal
-2. Before Rounds 2-5: `python3 daness_v2.py tournament/example/event/singles`
-3. After Round 5: `python3 daness_v2.py tournament/example/event/singles standings`
-4. Finalize the Final Standings phase in StartGG
+## Features
 
-### Swiss + Brackets Tournament
-1. Before Round 1: Seed players in StartGG as normal
-2. Before Rounds 2-5: `python3 daness_v2.py tournament/example/event/singles`
-3. After Round 5: `python3 daness_v2.py tournament/example/event/singles bracket`
-4. Add and seed players to brackets as indicated
-5. After brackets finish: `python3 daness_v2.py tournament/example/event/singles standings`
-6. Finalize the Final Standings phase in StartGG
-
-## Analyzing Player Pairings
-
-To understand why a player was paired with specific opponents:
-```bash
-python3 daness_v2.py <event-slug> why <player-name>
-```
-This shows:
-- Complete match history
-- Points breakdown for standings
-- Cinderella bonus calculations
-- Bracket placement reasoning (if applicable)
+- **Zero rematches:** Backtracking algorithm guarantees no repeat pairings
+- **Weekly variance:** Date-based randomness varies pairings week-to-week
+- **Smart pairing:** Prevents close-seed matchups in early rounds (heavy penalty for adjacent seeds)
+- **Cinderella bonuses:** Lower seeds get higher rewards for overperformance
+- **Stream recommendations:** Identifies compelling matchups by storyline
+- **Variable player counts:** Works with 32, 28, 24, or any count
 
 ## Notes
 
-- Initial seeding is saved to a file (e.g., `tournament-example-event-singles-seeding.txt`)
-- The tool uses an improved backtracking algorithm to prevent rematches
-- Special handling for the crucial 2-2 matches in round 5 (when using brackets)
-- Swiss pairings include controlled variance to prevent week-to-week repetition
-- Stream recommendations de-prioritize top seeds in favor of dramatic storylines
-- Requires all phases to be created in StartGG before running
-- Points-based system rewards quality wins and penalizes bad losses
-- Cinderella bonuses scale based on seed (higher bonus for lower seeds overperforming)
+- Tool never modifies match results, only seeding order
+- Pairing randomness is deterministic per day (same date = same pairings)
+- Cross-group pairing noted in output for non-power-of-2 tournaments
+- Bracket split always 50/50, main bracket gets extra on odd counts
+- Initial seeding saved to file (e.g., `tournament-example-event-singles-seeding.txt`)
+- Points system rewards quality wins and penalizes bad losses
+- Cinderella bonuses scale based on seed percentile
 
-## Mock Tournament Generator
+## Testing
 
-- Creates fake players with seeds 1-32
-- Simulates match outcomes with configurable upset rates
-- Maintains tournament state through rounds
-
-### Test Scenarios
-
-- `test_no_rematches_standard()`
-   - Runs a full 5-round Swiss
-   - Verifies no rematches occur
-
-- `test_high_upset_tournament()`
-   - Tests with 40% upset rate
-   - Verifies Cinderella bonus calculations work correctly
-
-- `test_round_5_critical_matches()`
-   - Specifically tests the 2-2 group pairing logic
-   - Ensures fair seed matchups for bracket qualification
-
-- `test_constraint_satisfaction()`
-   - Creates difficult pairing scenarios
-   - Tests the rematch avoidance algorithm under stress
-
-- `test_bracket_seeding_fairness()`
-   - Verifies top 16 make main bracket
-   - Checks that seeding rewards performance properly
-
-- `test_edge_cases()`
-   - Extreme upset scenarios
-   - Other boundary conditions
-
-### Usage
 ```bash
-python3 test_daness_v2.py
+python test_daness_v2.py
 ```
 
-### Adding New Tests
-
-To add a new test:
-```python
-def test_my_scenario(self):
-    """Test description"""
-    tournament = MockTournament(32, seed=12345)
-    
-    # Your test logic here
-    
-    return True  # or False if test fails
-```
-
-Then add to `run_all_tests()`:
-```python
-self.run_test("My Scenario", self.test_my_scenario)
-```
-
-This framework lets you:
-- Test edge cases without real tournaments
-- Reproduce bugs with specific seeds
-- Verify fixes don't break existing functionality
-- Ensure fairness in pairings and rankings
-
-You can also create specific tournament scenarios by manipulating the match results directly to test particular situations (like everyone at 2-2 going into round 5).
+Tests include: 32/28/24/20 players, date variance, odd counts, rematch avoidance, bracket fairness.

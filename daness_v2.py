@@ -292,41 +292,112 @@ def calculate_standings(initial_seeding, match_results):
     return standings
 
 
-def get_expected_wins(seed):
-    """Calculate expected wins based on seed"""
-    if seed <= 4:
-        return 4.0 - (seed - 1) * 0.2  # Seeds 1-4: 4.0, 3.8, 3.6, 3.4
-    elif seed <= 8:
-        return 3.5 - (seed - 4) * 0.15  # Seeds 5-8: 3.35, 3.2, 3.05, 2.9
-    elif seed <= 16:
-        return 3.0 - (seed - 8) * 0.1  # Seeds 9-16: 2.9 down to 2.2
-    elif seed <= 24:
-        return 2.2 - (seed - 16) * 0.1  # Seeds 17-24: 2.1 down to 1.4
+def calculate_recommended_rounds(num_players):
+    """Calculate recommended number of Swiss rounds based on player count"""
+    import math
+    
+    if num_players <= 0:
+        return 1
+    
+    # Standard formula: ceil(log2(n)) gives minimum rounds for Swiss
+    # Cap at 5 rounds as that's typical for most tournaments
+    recommended = min(5, math.ceil(math.log2(num_players)))
+    
+    # Ensure at least 3 rounds for reasonable tournament
+    recommended = max(3, recommended)
+    
+    return recommended
+
+
+def get_expected_wins(seed, total_players=32, num_rounds=5):
+    """Calculate expected wins based on seed, total players, and number of rounds
+    
+    Args:
+        seed: Player's initial seed (1 is best)
+        total_players: Total number of players in tournament
+        num_rounds: Number of Swiss rounds being played
+    
+    Returns:
+        Expected number of wins for this seed
+    """
+    if total_players <= 0 or seed <= 0 or seed > total_players:
+        return num_rounds / 2.0
+    
+    # Calculate expected win rate based on relative position
+    # Top player (seed 1) should win ~80% of matches (4.0 of 5)
+    # Middle player should win ~50% (2.5 of 5)
+    # Bottom player should win ~20% (1.0 of 5)
+    
+    # Normalize seed position from 0 (best) to 1 (worst)
+    normalized_position = (seed - 1) / max(1, total_players - 1)
+    
+    # Calculate win rate: 0.80 at top, 0.50 at middle, 0.20 at bottom
+    # Using a smooth curve
+    if normalized_position <= 0.5:
+        # Top half: interpolate from 0.80 to 0.50
+        win_rate = 0.80 - (normalized_position * 0.60)
     else:
-        return 1.4 - (seed - 24) * 0.05  # Seeds 25-32: 1.35 down to 1.0
+        # Bottom half: interpolate from 0.50 to 0.20
+        win_rate = 0.50 - ((normalized_position - 0.5) * 0.60)
+    
+    # Apply to number of rounds
+    expected = win_rate * num_rounds
+    
+    return expected
 
 
-def get_cinderella_multiplier(seed):
-    """Get Cinderella bonus multiplier based on seed"""
-    if seed <= 8:
+def get_cinderella_multiplier(seed, total_players=32):
+    """Get Cinderella bonus multiplier based on seed relative to total players
+    
+    Args:
+        seed: Player's initial seed
+        total_players: Total number of players in tournament
+    
+    Returns:
+        Tuple of (multiplier, description)
+    """
+    if total_players <= 0:
+        return 1.0, "moderate"
+    
+    # Calculate position as percentage through field
+    position_pct = seed / total_players
+    
+    # Top 25%: minimal bonus (these players are expected to do well)
+    if position_pct <= 0.25:
         return 0.5, "minimal (top seed)"
-    elif seed <= 16:
+    # 25-50%: moderate bonus
+    elif position_pct <= 0.50:
         return 1.0, "moderate (mid seed)"
-    elif seed <= 24:
+    # 50-75%: good bonus
+    elif position_pct <= 0.75:
         return 1.5, "good (lower seed)"
+    # Bottom 25%: maximum bonus (big Cinderella stories)
     else:
         return 2.0, "maximum (bottom seed)"
 
 
-def calculate_cinderella_bonus(seed, wins, standings, match_results, player_name):
-    """Calculate Cinderella bonus for a player"""
-    expected_wins = get_expected_wins(seed)
+def calculate_cinderella_bonus(seed, wins, standings, match_results, player_name, total_players=32, num_rounds=5):
+    """Calculate Cinderella bonus for a player
+    
+    Args:
+        seed: Player's initial seed
+        wins: Number of wins the player has
+        standings: Current standings dictionary
+        match_results: All match results
+        player_name: Name of the player
+        total_players: Total number of players in tournament
+        num_rounds: Number of rounds completed
+    
+    Returns:
+        Cinderella bonus points
+    """
+    expected_wins = get_expected_wins(seed, total_players, num_rounds)
     wins_above_expected = wins - expected_wins
     cinderella_bonus = 0
 
     # Only award Cinderella bonus for significant overperformance
     if wins_above_expected > 0.5:
-        multiplier, _ = get_cinderella_multiplier(seed)
+        multiplier, _ = get_cinderella_multiplier(seed, total_players)
 
         # Calculate bonus based on wins above expected
         for i in range(int(wins_above_expected)):
@@ -339,14 +410,18 @@ def calculate_cinderella_bonus(seed, wins, standings, match_results, player_name
             next_bonus = (3 + int(wins_above_expected) * 2) * multiplier
             cinderella_bonus += fractional_part * next_bonus
 
-        # Special upset bonus
+        # Special upset bonus - scale based on tournament size
         upset_bonus = 0
+        significant_upset_threshold = max(8, total_players // 4)  # 25% of field
+        big_upset_threshold = max(12, total_players // 3)  # 33% of field
+        huge_upset_threshold = max(16, total_players // 2)  # 50% of field
+        
         for opp_name in standings[player_name]["opponents"]:
             if opp_name in standings:
                 opp_seed = standings[opp_name]["seed"]
                 seed_diff = seed - opp_seed
 
-                if seed_diff >= 8:
+                if seed_diff >= significant_upset_threshold:
                     # Check if we actually beat them
                     for match in match_results:
                         match_players = [p["name"] for p in match["players"]]
@@ -361,9 +436,9 @@ def calculate_cinderella_bonus(seed, wins, standings, match_results, player_name
                                 None,
                             )
                             if player_id == winner_id:
-                                if seed_diff >= 16:
+                                if seed_diff >= huge_upset_threshold:
                                     upset_bonus += 5
-                                elif seed_diff >= 12:
+                                elif seed_diff >= big_upset_threshold:
                                     upset_bonus += 3
                                 else:
                                     upset_bonus += 2
@@ -371,11 +446,38 @@ def calculate_cinderella_bonus(seed, wins, standings, match_results, player_name
 
         cinderella_bonus += upset_bonus
 
-    # Cap Cinderella bonus at reasonable level
-    return min(cinderella_bonus, 20.0)
+    # Cap Cinderella bonus at reasonable level (scale with tournament size)
+    max_bonus = min(20.0, total_players * 0.625)  # 20 for 32 players
+    return min(cinderella_bonus, max_bonus)
 
 def calculate_swiss_pairings(standings, round_number=None):
-    """Calculate Swiss pairings with improved rematch avoidance"""
+    """Calculate Swiss pairings with improved rematch avoidance and date-based variance
+    
+    Args:
+        standings: Current standings dictionary
+        round_number: Current round number (optional, for display)
+    
+    Returns:
+        List of pairings (tuples of player info)
+    """
+    import math
+    
+    # Determine if we have a power of 2 players
+    total_players = len(standings)
+    is_power_of_2 = (total_players & (total_players - 1)) == 0 and total_players > 0
+    
+    # Get date-based seed for weekly variance
+    today = datetime.now()
+    week_seed = today.year * 10000 + today.month * 100 + today.day
+    random.seed(week_seed)
+    
+    print(f"\n{'='*60}")
+    print(f"SWISS PAIRING CALCULATION")
+    print(f"{'='*60}")
+    print(f"Total players: {total_players}")
+    print(f"Power of 2: {is_power_of_2}")
+    print(f"Date-based variance seed: {week_seed}")
+    
     # Group players by record
     groups = defaultdict(list)
     for player_name, info in standings.items():
@@ -407,6 +509,25 @@ def calculate_swiss_pairings(standings, round_number=None):
     def can_pair(p1, p2):
         """Check if two players can be paired (haven't played before)"""
         return p2[0] not in p1[1]["opponents"] and p1[0] not in p2[1]["opponents"]
+    
+    def get_pairing_quality(p1, p2):
+        """Calculate quality score for a pairing (lower is better/more reasonable)
+        
+        This ensures seed 1 doesn't play seed 2 in early rounds, etc.
+        """
+        seed_diff = abs(p1[1]["seed"] - p2[1]["seed"])
+        
+        # For power of 2 tournaments, prioritize similar performance
+        # For non-power of 2, allow more flexibility
+        if is_power_of_2:
+            # Penalize extreme seed differences within same score group
+            return seed_diff
+        else:
+            # More lenient - just avoid obviously bad pairings
+            # Seeds 1-2 should never play early, etc.
+            if seed_diff <= 1 and (p1[1]["wins"] + p1[1]["losses"]) <= 2:
+                return 1000  # Heavy penalty for top seeds playing too early
+            return seed_diff * 0.5  # Less weight on seed difference
 
     def find_valid_pairing_for_group(players_list):
         """
@@ -419,6 +540,12 @@ def calculate_swiss_pairings(standings, round_number=None):
         if len(players_list) == 1:
             # Odd player, will be handled later
             return None
+        
+        # Sort by seed with some randomness for variance
+        players_with_random = [(p, random.random()) for p in players_list]
+        players_sorted = sorted(players_with_random, 
+                              key=lambda x: (x[0][1]["seed"] + x[1] * 3))  # Add variance
+        players_list = [p[0] for p in players_sorted]
             
         # For small groups, use exhaustive search
         if len(players_list) <= 8:
@@ -450,18 +577,27 @@ def calculate_swiss_pairings(standings, round_number=None):
         if p1 is None:
             return current_matching
         
-        # Try pairing with each valid opponent
+        # Build list of valid opponents sorted by pairing quality
+        valid_opponents = []
         for p2 in players:
             if p2[0] not in used_players and p1[0] != p2[0] and can_pair(p1, p2):
-                # Try this pairing
-                new_matching = current_matching + [(p1, p2)]
-                new_used = used_players | {p1[0], p2[0]}
-                
-                # Recursively try to pair remaining players
-                result = find_perfect_matching_backtrack(players, new_matching, new_used)
-                
-                if result is not None and len(result) * 2 == len(players):
-                    return result
+                quality = get_pairing_quality(p1, p2)
+                valid_opponents.append((p2, quality))
+        
+        # Sort by quality (best matches first)
+        valid_opponents.sort(key=lambda x: x[1])
+        
+        # Try pairing with each valid opponent
+        for p2, _ in valid_opponents:
+            # Try this pairing
+            new_matching = current_matching + [(p1, p2)]
+            new_used = used_players | {p1[0], p2[0]}
+            
+            # Recursively try to pair remaining players
+            result = find_perfect_matching_backtrack(players, new_matching, new_used)
+            
+            if result is not None and len(result) * 2 == len(players):
+                return result
         
         # No valid pairing found with p1
         return None
@@ -474,8 +610,8 @@ def calculate_swiss_pairings(standings, round_number=None):
         if n % 2 != 0:
             return None
         
-        # Strategy 1: Swiss-style pairing (top half vs bottom half)
-        players_sorted = sorted(players, key=lambda x: x[1]["seed"])
+        # Strategy 1: Swiss-style pairing (top half vs bottom half) with variance
+        players_sorted = sorted(players, key=lambda x: (x[1]["seed"], random.random()))
         half = n // 2
         
         # Try standard Swiss pairing first
@@ -485,25 +621,28 @@ def calculate_swiss_pairings(standings, round_number=None):
         for i in range(half):
             if i not in used_indices:
                 # Try to pair with corresponding player in other half
-                j = i + half
-                if j not in used_indices and can_pair(players_sorted[i], players_sorted[j]):
-                    swiss_pairs.append((players_sorted[i], players_sorted[j]))
-                    used_indices.add(i)
-                    used_indices.add(j)
+                # Add some variance to avoid always pairing same positions
+                for offset in range(3):  # Try j, j+1, j-1
+                    j = i + half + (offset - 1 if offset > 0 else 0)
+                    if 0 <= j < n and j not in used_indices and can_pair(players_sorted[i], players_sorted[j]):
+                        swiss_pairs.append((players_sorted[i], players_sorted[j]))
+                        used_indices.add(i)
+                        used_indices.add(j)
+                        break
         
         if len(swiss_pairs) == half:
             return swiss_pairs
         
-        # Strategy 2: Minimum weight matching based on seed difference
+        # Strategy 2: Minimum weight matching based on seed difference with quality check
         # Build adjacency matrix
         valid_pairings = []
         for i in range(n):
             for j in range(i + 1, n):
                 if can_pair(players[i], players[j]):
-                    weight = abs(players[i][1]["seed"] - players[j][1]["seed"])
+                    weight = get_pairing_quality(players[i], players[j])
                     valid_pairings.append((i, j, weight))
         
-        # Sort by weight (seed difference)
+        # Sort by weight (better pairings first)
         valid_pairings.sort(key=lambda x: x[2])
         
         # Greedy matching
@@ -538,9 +677,10 @@ def calculate_swiss_pairings(standings, round_number=None):
         
         print(f"\nPairing {record[0]}-{record[1]} group ({len(available)} players):")
         
-        # Handle odd number - hold out middle player
+        # Handle odd number - hold out best candidate for cross-group pairing
         held_out_player = None
         if len(available) % 2 == 1:
+            # For non-power-of-2, we expect cross-group pairing
             # Choose player with most potential opponents for cross-group pairing
             best_player = None
             best_flexibility = -1
@@ -573,11 +713,14 @@ def calculate_swiss_pairings(standings, round_number=None):
             while len(temp_available) >= 2:
                 p1 = temp_available[0]
                 best_opponent = None
+                best_quality = float('inf')
                 
                 for p2 in temp_available[1:]:
                     if can_pair(p1, p2):
-                        best_opponent = p2
-                        break
+                        quality = get_pairing_quality(p1, p2)
+                        if quality < best_quality:
+                            best_quality = quality
+                            best_opponent = p2
                 
                 if best_opponent:
                     group_pairings.append((p1, best_opponent))
@@ -619,10 +762,12 @@ def calculate_swiss_pairings(standings, round_number=None):
     # Handle remaining unpaired players with cross-group pairing
     if unpaired_players:
         print(f"\nCross-group pairings for {len(unpaired_players)} remaining players:")
+        if not is_power_of_2:
+            print("  (Cross-group pairing is expected for non-power-of-2 tournaments)")
         
-        # Sort by performance (wins - losses) and seed
+        # Sort by performance (wins - losses) and seed with variance
         unpaired_players.sort(
-            key=lambda x: (-(x[1]["wins"] - x[1]["losses"]), x[1]["seed"])
+            key=lambda x: (-(x[1]["wins"] - x[1]["losses"]), x[1]["seed"] + random.random() * 2)
         )
         
         # Try to pair them optimally
@@ -672,6 +817,9 @@ def calculate_swiss_pairings(standings, round_number=None):
         print(f"  ❌ Found {rematch_count} rematch(es)")
         print("     This should only happen if mathematically unavoidable")
         print("     Check if the tournament structure allows for valid pairings")
+    
+    # Reset random seed to avoid affecting other code
+    random.seed()
     
     return pairings
 
@@ -785,12 +933,23 @@ def update_phase_seeding_for_pairings(phase_id, phase_groups, pairings):
 
 
 def calculate_final_standings_points_based(initial_seeding, match_results):
-    """Calculate final standings using a points-based system with Cinderella run bonuses"""
+    """Calculate final standings using a points-based system with Cinderella run bonuses
+    
+    Args:
+        initial_seeding: Dictionary of player names to initial seeds
+        match_results: List of all match results
+    
+    Returns:
+        List of player standings sorted by total score
+    """
     standings = calculate_standings(initial_seeding, match_results)
 
     # Convert to list and calculate points-based scores
     final_standings = []
     total_players = len(initial_seeding)
+    
+    # Determine number of rounds from match results
+    num_rounds = max((m["round"] for m in match_results), default=5)
 
     for player_name, info in standings.items():
         # Base points from initial seeding
@@ -825,9 +984,10 @@ def calculate_final_standings_points_based(initial_seeding, match_results):
                             loss_penalty = (total_players - opp_base_points + 1) * 0.05
                             loss_points -= loss_penalty
 
-        # Calculate Cinderella bonus
+        # Calculate Cinderella bonus with proper parameters
         cinderella_bonus = calculate_cinderella_bonus(
-            info["seed"], info["wins"], standings, match_results, player_name
+            info["seed"], info["wins"], standings, match_results, player_name,
+            total_players, num_rounds
         )
 
         # Total score
@@ -839,7 +999,7 @@ def calculate_final_standings_points_based(initial_seeding, match_results):
             + cinderella_bonus
         )
 
-        expected_wins = get_expected_wins(info["seed"])
+        expected_wins = get_expected_wins(info["seed"], total_players, num_rounds)
         wins_above_expected = info["wins"] - expected_wins
 
         final_standings.append(
@@ -933,11 +1093,22 @@ def find_best_bracket_arrangement(players, bracket_name):
 
 
 def count_bracket_rematches(players):
-    """Count potential first round rematches in a 16-player bracket"""
+    """Count potential first round rematches in a bracket of any size"""
+    if len(players) == 0:
+        return 0
+    
     rematches = 0
-    for i in range(8):
-        p1 = players[i]
-        p2 = players[15 - i]
+    num_matches = len(players) // 2
+    
+    for i in range(num_matches):
+        p1_idx = i
+        p2_idx = len(players) - 1 - i
+        
+        if p2_idx >= len(players) or p1_idx >= len(players):
+            break
+            
+        p1 = players[p1_idx]
+        p2 = players[p2_idx]
 
         if p2["name"] in p1["opponents"]:
             rematches += 1
@@ -946,10 +1117,25 @@ def count_bracket_rematches(players):
 
 
 def generate_bracket_seeding(final_standings):
-    """Generate seeding for main and redemption brackets with rematch avoidance"""
+    """Generate seeding for main and redemption brackets with rematch avoidance
+    
+    Dynamically determines bracket split based on total player count.
+    Prioritizes main bracket for players with better records.
+    """
     print("\n" + "=" * 60)
     print("BRACKET SEEDING GENERATION (Points-Based System)")
     print("=" * 60)
+
+    total_players = len(final_standings)
+    
+    # Calculate bracket split - aim for 50/50 split, prioritizing main bracket
+    # For odd numbers, main bracket gets extra player
+    main_bracket_size = (total_players + 1) // 2
+    redemption_bracket_size = total_players - main_bracket_size
+    
+    print(f"\nTotal players: {total_players}")
+    print(f"Main bracket size: {main_bracket_size}")
+    print(f"Redemption bracket size: {redemption_bracket_size}")
 
     # Group players by record for display
     record_groups = defaultdict(list)
@@ -974,9 +1160,14 @@ def generate_bracket_seeding(final_standings):
                 f"score: {player['total_score']:.0f})"
             )
 
-    # Determine bracket cutoff - top 16 to main, bottom 16 to redemption
-    main_bracket_candidates = final_standings[:16]
-    redemption_bracket_candidates = final_standings[16:]
+    # Determine bracket cutoff - top N to main, rest to redemption
+    main_bracket_candidates = final_standings[:main_bracket_size]
+    redemption_bracket_candidates = final_standings[main_bracket_size:]
+    
+    # Handle case where brackets might be different sizes
+    if len(redemption_bracket_candidates) < redemption_bracket_size:
+        print(f"\n⚠️  Warning: Not enough players for redemption bracket")
+        print(f"   Expected {redemption_bracket_size}, got {len(redemption_bracket_candidates)}")
 
     # Optimize bracket arrangements to minimize rematches
     print(f"\n{'OPTIMIZING BRACKET ARRANGEMENTS TO AVOID REMATCHES'}")
@@ -985,40 +1176,66 @@ def generate_bracket_seeding(final_standings):
     main_bracket_players, main_rematches = find_best_bracket_arrangement(
         main_bracket_candidates, "Main"
     )
-    redemption_bracket_players, redemption_rematches = find_best_bracket_arrangement(
-        redemption_bracket_candidates, "Redemption"
-    )
+    
+    if redemption_bracket_candidates:
+        redemption_bracket_players, redemption_rematches = find_best_bracket_arrangement(
+            redemption_bracket_candidates, "Redemption"
+        )
+    else:
+        redemption_bracket_players = []
+        redemption_rematches = 0
 
     # Display final brackets
-    print(f"\n{'MAIN BRACKET (Top 16)':<40} {'REDEMPTION BRACKET (Bottom 16)'}")
-    print("-" * 80)
+    print(f"\n{'MAIN BRACKET':<50} {'REDEMPTION BRACKET'}")
+    print(f"({'Top ' + str(main_bracket_size) + ' players':<50}) ({'Bottom ' + str(redemption_bracket_size) + ' players'})")
+    print("-" * 100)
 
-    for i in range(16):
-        main_player = main_bracket_players[i]
-        redemption_player = redemption_bracket_players[i]
+    max_bracket_size = max(len(main_bracket_players), len(redemption_bracket_players))
+    for i in range(max_bracket_size):
+        if i < len(main_bracket_players):
+            main_player = main_bracket_players[i]
+            main_info = f"{i+1:2d}. {main_player['name']} ({main_player['wins']}-{main_player['losses']})"
+        else:
+            main_info = ""
+        
+        if i < len(redemption_bracket_players):
+            redemption_player = redemption_bracket_players[i]
+            redemption_info = f"{i+1:2d}. {redemption_player['name']} ({redemption_player['wins']}-{redemption_player['losses']})"
+        else:
+            redemption_info = ""
 
-        main_info = f"{i+1:2d}. {main_player['name']} ({main_player['wins']}-{main_player['losses']})"
-        redemption_info = f"{i+1:2d}. {redemption_player['name']} ({redemption_player['wins']}-{redemption_player['losses']})"
-
-        print(f"{main_info:<40} {redemption_info}")
+        print(f"{main_info:<50} {redemption_info}")
 
     # Show rematch analysis
     print(f"\n{'REMATCH ANALYSIS'}")
     print("-" * 50)
 
     def show_bracket_rematches(players, bracket_name):
+        if len(players) == 0:
+            print(f"\n{bracket_name}: No players")
+            return []
+        
         print(f"\n{bracket_name} first round matchups:")
         rematches = []
 
-        for i in range(8):
-            p1 = players[i]
-            p2 = players[15 - i]
+        # Determine number of first round matches
+        num_matches = len(players) // 2
+
+        for i in range(num_matches):
+            p1_idx = i
+            p2_idx = len(players) - 1 - i
+            
+            if p2_idx >= len(players):
+                break
+                
+            p1 = players[p1_idx]
+            p2 = players[p2_idx]
 
             status = "REMATCH!" if p2["name"] in p1["opponents"] else "OK"
             print(f"  Match {i+1}: {p1['name']} vs {p2['name']} - {status}")
 
             if p2["name"] in p1["opponents"]:
-                rematches.append((i + 1, 16 - i, p1["name"], p2["name"]))
+                rematches.append((p1_idx + 1, p2_idx + 1, p1["name"], p2["name"]))
 
         return rematches
 
@@ -1680,7 +1897,9 @@ def analyze_player_pairings(player_name, initial_seeding, detailed_phases):
         print(f"Loss Quality: {player_standing['loss_points']:.1f}")
 
         # Cinderella bonus calculation with details
-        expected_wins = get_expected_wins(player_seed)
+        total_players = len(initial_seeding)
+        num_rounds = len(swiss_matches)
+        expected_wins = get_expected_wins(player_seed, total_players, num_rounds)
         actual_wins_above = swiss_wins - expected_wins
 
         print(f"\nCINDERELLA BONUS CALCULATION:")
@@ -1689,25 +1908,29 @@ def analyze_player_pairings(player_name, initial_seeding, detailed_phases):
         print(f"  Overperformance: {actual_wins_above:.1f} wins")
 
         if actual_wins_above > 0.5:
-            multiplier, desc = get_cinderella_multiplier(player_seed)
+            multiplier, desc = get_cinderella_multiplier(player_seed, total_players)
             print(f"  Multiplier: {multiplier}x ({desc})")
 
-            # Show any major upsets
+            # Show any major upsets - scale with tournament size
+            significant_upset_threshold = max(8, total_players // 4)
+            big_upset_threshold = max(12, total_players // 3)
+            huge_upset_threshold = max(16, total_players // 2)
+            
             upset_count = 0
             for match in swiss_matches:
                 if match["won"]:
                     seed_diff = player_seed - match["opponent_seed"]
-                    if seed_diff >= 16:
+                    if seed_diff >= huge_upset_threshold:
                         print(
                             f"  🌟 HUGE upset vs {match['opponent']} (#{match['opponent_seed']})"
                         )
                         upset_count += 1
-                    elif seed_diff >= 12:
+                    elif seed_diff >= big_upset_threshold:
                         print(
                             f"  ⭐ Big upset vs {match['opponent']} (#{match['opponent_seed']})"
                         )
                         upset_count += 1
-                    elif seed_diff >= 8:
+                    elif seed_diff >= significant_upset_threshold:
                         print(
                             f"  ✨ Upset vs {match['opponent']} (#{match['opponent_seed']})"
                         )
@@ -1778,7 +2001,7 @@ def main():
     try:
         if len(sys.argv) < 2:
             print(
-                "Usage: python daness-v2.py <event-slug> [round|bracket|standings|why]"
+                "Usage: python daness-v2.py <event-slug> [round|bracket|standings|why|recommend]"
             )
             print(
                 "Example: python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2"
@@ -1795,10 +2018,46 @@ def main():
             print(
                 "         python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2 why <player-name>"
             )
+            print(
+                "         python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2 recommend"
+            )
             sys.exit(1)
 
         slug = sys.argv[1]
         command = sys.argv[2] if len(sys.argv) > 2 else None
+
+        # Handle recommend command early (doesn't need API call)
+        if command == "recommend":
+            if len(sys.argv) < 4:
+                print("Usage: python daness-v2.py <event-slug> recommend <num-players>")
+                print("Example: python daness-v2.py tournament/event recommend 28")
+                sys.exit(1)
+            
+            try:
+                num_players = int(sys.argv[3])
+                recommended_rounds = calculate_recommended_rounds(num_players)
+                
+                print(f"\n{'='*60}")
+                print(f"SWISS ROUNDS RECOMMENDATION")
+                print(f"{'='*60}")
+                print(f"\nNumber of players: {num_players}")
+                print(f"Recommended Swiss rounds: {recommended_rounds}")
+                print(f"\nExplanation:")
+                print(f"  - Minimum rounds for Swiss: ceil(log2({num_players})) = {recommended_rounds}")
+                print(f"  - This ensures adequate differentiation between players")
+                print(f"  - Maximum capped at 5 rounds for practical tournament length")
+                
+                # Show expected bracket split
+                main_size = (num_players + 1) // 2
+                redemption_size = num_players - main_size
+                print(f"\nExpected bracket split after {recommended_rounds} rounds:")
+                print(f"  - Main bracket: {main_size} players")
+                print(f"  - Redemption bracket: {redemption_size} players")
+                
+                return
+            except ValueError:
+                print(f"Error: '{sys.argv[3]}' is not a valid number")
+                sys.exit(1)
 
         print(f"Fetching basic event data for: {slug}")
 

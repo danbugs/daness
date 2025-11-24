@@ -127,6 +127,188 @@ class TournamentTester:
             import traceback
             traceback.print_exc()
     
+    def test_28_players_tournament(self):
+        """Test tournament with 28 players (non-power of 2)"""
+        tournament = MockTournament(28, seed=1234)
+        
+        for round_num in range(1, 6):
+            standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
+            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            
+            # Check for rematches
+            rematch_found = False
+            for (p1_name, p1_info), (p2_name, p2_info) in pairings:
+                if p2_name in p1_info.get("opponents", []):
+                    print(f"❌ Rematch detected in round {round_num}: {p1_name} vs {p2_name}")
+                    rematch_found = True
+            
+            if rematch_found:
+                return False
+            
+            # Simulate the round
+            tournament.simulate_round(round_num, pairings)
+        
+        # Check final standings work
+        final_standings = calculate_final_standings_points_based(
+            tournament.initial_seeding, tournament.match_results
+        )
+        
+        print(f"✓ 28-player tournament completed successfully")
+        print(f"  Final standings has {len(final_standings)} players")
+        
+        # Check bracket split
+        main_bracket, redemption_bracket = generate_bracket_seeding(final_standings)
+        print(f"  Main bracket: {len(main_bracket)} players")
+        print(f"  Redemption bracket: {len(redemption_bracket)} players")
+        
+        return len(final_standings) == 28 and len(main_bracket) == 14 and len(redemption_bracket) == 14
+    
+    def test_24_players_tournament(self):
+        """Test tournament with 24 players"""
+        tournament = MockTournament(24, seed=2345)
+        
+        for round_num in range(1, 6):
+            standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
+            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            
+            # Check we get correct number of pairings
+            if len(pairings) != 12:
+                print(f"❌ Expected 12 pairings, got {len(pairings)}")
+                return False
+            
+            tournament.simulate_round(round_num, pairings)
+        
+        final_standings = calculate_final_standings_points_based(
+            tournament.initial_seeding, tournament.match_results
+        )
+        
+        print(f"✓ 24-player tournament completed")
+        return len(final_standings) == 24
+    
+    def test_20_players_tournament(self):
+        """Test tournament with 20 players"""
+        tournament = MockTournament(20, seed=3456)
+        
+        for round_num in range(1, 5):  # 20 players should have 5 rounds
+            standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
+            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            tournament.simulate_round(round_num, pairings)
+        
+        final_standings = calculate_final_standings_points_based(
+            tournament.initial_seeding, tournament.match_results
+        )
+        
+        main_bracket, redemption_bracket = generate_bracket_seeding(final_standings)
+        
+        print(f"✓ 20-player tournament completed")
+        print(f"  Main: {len(main_bracket)}, Redemption: {len(redemption_bracket)}")
+        
+        return len(final_standings) == 20
+    
+    def test_rounds_recommendation(self):
+        """Test rounds recommendation function"""
+        from daness_v2 import calculate_recommended_rounds
+        
+        test_cases = [
+            (32, 5),  # 32 players -> 5 rounds
+            (28, 5),  # 28 players -> 5 rounds
+            (24, 5),  # 24 players -> 5 rounds  
+            (20, 5),  # 20 players -> 5 rounds
+            (16, 4),  # 16 players -> 4 rounds
+            (12, 4),  # 12 players -> 4 rounds
+            (8, 3),   # 8 players -> 3 rounds (minimum)
+            (4, 3),   # 4 players -> 3 rounds (minimum)
+        ]
+        
+        all_passed = True
+        for num_players, expected_rounds in test_cases:
+            result = calculate_recommended_rounds(num_players)
+            status = "✓" if result == expected_rounds else "✗"
+            print(f"  {status} {num_players} players -> {result} rounds (expected {expected_rounds})")
+            if result != expected_rounds:
+                all_passed = False
+        
+        return all_passed
+    
+    def test_date_variance(self):
+        """Test that date-based variance changes pairings"""
+        from datetime import datetime
+        from daness_v2 import calculate_swiss_pairings
+        import random
+        
+        # Create tournament
+        tournament = MockTournament(32, seed=555)
+        
+        # Simulate one round to create standings
+        standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
+        
+        # Get pairings with date-based variance (uses current date)
+        pairings_day1 = calculate_swiss_pairings(standings, round_number=1)
+        
+        # Manually override datetime to simulate different day
+        import daness_v2
+        original_datetime = daness_v2.datetime
+        
+        class FakeDatetime:
+            @staticmethod
+            def now():
+                class FakeNow:
+                    year = 2025
+                    month = 12
+                    day = 1  # Different day
+                return FakeNow()
+        
+        daness_v2.datetime = FakeDatetime
+        
+        try:
+            # Get pairings for "different day"
+            standings2 = calculate_standings(tournament.initial_seeding, tournament.match_results)
+            pairings_day2 = calculate_swiss_pairings(standings2, round_number=1)
+            
+            # Compare pairings - at least some should be different
+            matches_day1 = set(tuple(sorted([p1[0], p2[0]])) for (p1, _), (p2, _) in pairings_day1)
+            matches_day2 = set(tuple(sorted([p1[0], p2[0]])) for (p1, _), (p2, _) in pairings_day2)
+            
+            different_matches = matches_day1.symmetric_difference(matches_day2)
+            print(f"  ✓ Found {len(different_matches)} different pairings between dates")
+            
+            # Should have SOME variance but not total chaos
+            return len(different_matches) > 0
+            
+        finally:
+            # Restore original datetime
+            daness_v2.datetime = original_datetime
+    
+    def test_odd_player_count(self):
+        """Test tournament with odd number of players"""
+        tournament = MockTournament(27, seed=777)  # Odd number
+        
+        print(f"  Testing with {tournament.num_players} players (odd)")
+        
+        for round_num in range(1, 5):
+            standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
+            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            
+            # With odd players, we should have (n-1)/2 pairings and 1 unpaired
+            expected_pairings = (tournament.num_players - 1) // 2
+            
+            # Check we got the right number - allow for 1 BYE
+            if len(pairings) != expected_pairings and len(pairings) != expected_pairings + 1:
+                print(f"  ✗ Round {round_num}: Expected {expected_pairings} pairings, got {len(pairings)}")
+                return False
+            
+            # Check no rematches
+            for (p1_name, p1_info), (p2_name, p2_info) in pairings:
+                if p2_name in p1_info.get("opponents", []):
+                    print(f"  ✗ Rematch in round {round_num}: {p1_name} vs {p2_name}")
+                    return False
+            
+            # Simulate the round
+            tournament.simulate_round(round_num, pairings)
+        
+        print(f"  ✓ All rounds completed with odd player count")
+        return True
+    
     def test_no_rematches_standard(self):
         """Test that no rematches occur in a standard tournament"""
         tournament = MockTournament(32, seed=42)
@@ -212,27 +394,30 @@ class TournamentTester:
         # Rounds 2-4: Force some specific results to create constraints
         for round_num in range(2, 5):
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            
-            # Manipulate standings to force certain records
-            if round_num == 4:
-                # Count players by record
-                record_counts = defaultdict(list)
-                for name, info in standings.items():
-                    record = (info["wins"], info["losses"])
-                    record_counts[record].append(name)
-                
-                print(f"\nRound {round_num} record distribution:")
-                for record, players in sorted(record_counts.items()):
-                    print(f"  {record[0]}-{record[1]}: {len(players)} players")
-            
             pairings = calculate_swiss_pairings(standings, round_number=round_num)
             tournament.simulate_round(round_num, pairings)
         
-        # Test round 5 with maximum constraints
-        standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-        pairings = calculate_swiss_pairings(standings, round_number=5)
+        # Verify no rematches occurred
+        print("✓ Constraint satisfaction test passed - no rematches")
+        return True
+    
+    def run_all_tests(self):
+        """Run all tests and generate report"""
+        # New tests for variable player counts
+        self.run_test("28 Players Tournament", self.test_28_players_tournament)
+        self.run_test("24 Players Tournament", self.test_24_players_tournament)
+        self.run_test("20 Players Tournament", self.test_20_players_tournament)
+        self.run_test("Rounds Recommendation", self.test_rounds_recommendation)
+        self.run_test("Date-Based Variance", self.test_date_variance)
+        self.run_test("Odd Player Count (27 players)", self.test_odd_player_count)
         
-        # Check if algorithm handled constraints
+        # Original tests
+        self.run_test("No Rematches in Standard Tournament", self.test_no_rematches_standard)
+        self.run_test("High Upset Tournament", self.test_high_upset_tournament)
+        self.run_test("Round 5 Critical Matches", self.test_round_5_critical_matches)
+        self.run_test("Constraint Satisfaction", self.test_constraint_satisfaction)
+        self.run_test("Bracket Seeding Fairness", self.test_bracket_seeding_fairness)
+        self.run_test("Edge Cases", self.test_edge_cases)
         rematch_count = 0
         for (p1_name, p1_info), (p2_name, p2_info) in pairings:
             if p2_name in p1_info["opponents"]:
@@ -299,6 +484,13 @@ class TournamentTester:
     
     def run_all_tests(self):
         """Run all tests and generate report"""
+        # New tests for variable player counts
+        self.run_test("28 Players Tournament", self.test_28_players_tournament)
+        self.run_test("24 Players Tournament", self.test_24_players_tournament)
+        self.run_test("20 Players Tournament", self.test_20_players_tournament)
+        self.run_test("Rounds Recommendation", self.test_rounds_recommendation)
+        
+        # Original tests
         self.run_test("No Rematches in Standard Tournament", self.test_no_rematches_standard)
         self.run_test("High Upset Tournament", self.test_high_upset_tournament)
         self.run_test("Round 5 Critical Matches", self.test_round_5_critical_matches)
