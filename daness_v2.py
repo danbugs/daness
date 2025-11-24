@@ -188,7 +188,7 @@ def load_initial_seeding(filename):
 
 
 def get_match_results_from_phases(phases, swiss_only=False):
-    """Extract all match results from completed phases"""
+    """Extract all match results from completed phases, including byes"""
     all_results = []
 
     for phase in phases:
@@ -212,6 +212,9 @@ def get_match_results_from_phases(phases, swiss_only=False):
                 continue
 
             for group in phase["phaseGroups"]["nodes"]:
+                # Track which players had matches
+                players_with_matches = set()
+                
                 for set_data in group["sets"]["nodes"]:
                     set_state = get_phase_state(set_data["state"])
                     if set_state == 3 and set_data["winnerId"]:  # Completed
@@ -226,16 +229,38 @@ def get_match_results_from_phases(phases, swiss_only=False):
 
                         for slot in set_data["slots"]:
                             if slot["entrant"]:
+                                player_name = slot["entrant"]["participants"][0]["gamerTag"]
+                                players_with_matches.add(player_name)
                                 match_result["players"].append(
                                     {
                                         "id": slot["entrant"]["id"],
-                                        "name": slot["entrant"]["participants"][0][
-                                            "gamerTag"
-                                        ],
+                                        "name": player_name,
                                     }
                                 )
 
                         all_results.append(match_result)
+                
+                # Detect byes - players who are seeded but didn't play
+                all_seeded_players = set()
+                for seed in group["seeds"]["nodes"]:
+                    if seed["entrant"]:
+                        all_seeded_players.add(seed["entrant"]["participants"][0]["gamerTag"])
+                
+                bye_players = all_seeded_players - players_with_matches
+                
+                # Add bye entries to results
+                for bye_player in bye_players:
+                    bye_result = {
+                        "round": round_num,
+                        "winner_id": "BYE",  # Special marker for byes
+                        "players": [{
+                            "id": f"bye_{bye_player}",
+                            "name": bye_player
+                        }],
+                        "phase_name": phase["name"],
+                    }
+                    all_results.append(bye_result)
+                    print(f"  Detected BYE in {phase_name}: {bye_player}")
 
     return all_results
 
@@ -260,10 +285,20 @@ def calculate_standings(initial_seeding, match_results):
             "losses": 0,
             "opponents": [],
             "opponent_wins": 0,
+            "byes": 0,  # Track how many byes this player has received
         }
 
     # Process match results
     for match in match_results:
+        # Check if this is a bye (special format: winner_id = "BYE" and only one player)
+        if match["winner_id"] == "BYE" and len(match["players"]) == 1:
+            player_name = match["players"][0]["name"]
+            if player_name in standings:
+                standings[player_name]["wins"] += 1  # Bye counts as a win
+                standings[player_name]["byes"] += 1
+                standings[player_name]["opponents"].append("BYE")
+            continue
+        
         winner_id = match["winner_id"]
 
         for player in match["players"]:
@@ -292,21 +327,53 @@ def calculate_standings(initial_seeding, match_results):
     return standings
 
 
-def calculate_recommended_rounds(num_players):
-    """Calculate recommended number of Swiss rounds based on player count"""
+def calculate_recommended_rounds(num_players, num_setups=None):
+    """Calculate recommended number of Swiss rounds based on player count and setup constraints
+    
+    Logic:
+    - Ideal rounds: ceil(log2(players)), capped at 3-5
+    - If 1-3 setups under required: drop 1 round (manageable overflow)
+    - If 4+ setups under required: drop 2 rounds (too much overflow)
+    - Never allows 3+ waves per round
+    
+    Args:
+        num_players: Total number of players
+        num_setups: Number of available setups (stations). If None, assumes unlimited.
+    
+    Returns:
+        Recommended number of rounds (3-5), or None if unrunnable
+    """
     import math
     
     if num_players <= 0:
-        return 1
+        return 3
     
-    # Standard formula: ceil(log2(n)) gives minimum rounds for Swiss
-    # Cap at 5 rounds as that's typical for most tournaments
-    recommended = min(5, math.ceil(math.log2(num_players)))
+    # Ideal rounds for differentiation (no setup constraint)
+    ideal_rounds = min(5, max(3, math.ceil(math.log2(num_players))))
     
-    # Ensure at least 3 rounds for reasonable tournament
-    recommended = max(3, recommended)
+    if num_setups is None:
+        return ideal_rounds
     
-    return recommended
+    matches_per_round = num_players // 2  # Actual matches (bye doesn't need a setup)
+    
+    if num_setups >= matches_per_round:
+        # Enough setups - no constraint
+        return ideal_rounds
+    
+    # Check if tournament is runnable (need at least half the setups)
+    if num_setups < matches_per_round // 2:
+        return None  # Unrunnable
+    
+    # Calculate shortage (how many setups short of ideal)
+    shortage = matches_per_round - num_setups
+    
+    # 1-3 setups short: drop 1 round (keeps waves at 2)
+    if shortage <= 3:
+        return max(3, ideal_rounds - 1)
+    
+    # 4+ setups short: drop 2 rounds (prevents excessive waiting)
+    else:
+        return max(3, ideal_rounds - 2)
 
 
 def get_expected_wins(seed, total_players=32, num_rounds=5):
@@ -759,7 +826,8 @@ def calculate_swiss_pairings(standings, round_number=None):
             if player[0] not in used:
                 unpaired_players.append(player)
 
-    # Handle remaining unpaired players with cross-group pairing
+    # Handle remaining unpaired players with cross-group pairing or bye
+    bye_player = None
     if unpaired_players:
         print(f"\nCross-group pairings for {len(unpaired_players)} remaining players:")
         if not is_power_of_2:
@@ -770,32 +838,45 @@ def calculate_swiss_pairings(standings, round_number=None):
             key=lambda x: (-(x[1]["wins"] - x[1]["losses"]), x[1]["seed"] + random.random() * 2)
         )
         
-        # Try to pair them optimally
-        cross_group_pairs = find_valid_pairing_for_group(unpaired_players)
+        # If odd number of unpaired, one gets a bye
+        if len(unpaired_players) % 2 == 1:
+            # Select player with fewest byes (or best record if tied)
+            unpaired_players_sorted_for_bye = sorted(
+                unpaired_players,
+                key=lambda x: (x[1].get("byes", 0), -(x[1]["wins"] - x[1]["losses"]), x[1]["seed"])
+            )
+            bye_player = unpaired_players_sorted_for_bye[0]
+            unpaired_players.remove(bye_player)
+            print(f"\n🎫 BYE assigned to: {bye_player[0]} (Record: {bye_player[1]['wins']}-{bye_player[1]['losses']}, Previous byes: {bye_player[1].get('byes', 0)})")
+            print(f"   This player will receive an automatic win for this round")
         
-        if cross_group_pairs:
-            for p1, p2 in cross_group_pairs:
-                pairings.append((p1, p2))
-                used.add(p1[0])
-                used.add(p2[0])
-                print(f"  ✓ {p1[0]} ({p1[1]['wins']}-{p1[1]['losses']}) vs {p2[0]} ({p2[1]['wins']}-{p2[1]['losses']})")
-        else:
-            # Last resort: pair any remaining players
-            print("  ⚠️  Could not find valid cross-group pairings, using fallback")
-            i = 0
-            while i < len(unpaired_players) - 1:
-                p1 = unpaired_players[i]
-                p2 = unpaired_players[i + 1]
-                pairings.append((p1, p2))
-                used.add(p1[0])
-                used.add(p2[0])
-                
-                if can_pair(p1, p2):
-                    print(f"  ✓ {p1[0]} vs {p2[0]}")
-                else:
-                    print(f"  ⚠️  FORCED REMATCH: {p1[0]} vs {p2[0]}")
-                
-                i += 2
+        # Try to pair remaining players optimally
+        if len(unpaired_players) >= 2:
+            cross_group_pairs = find_valid_pairing_for_group(unpaired_players)
+            
+            if cross_group_pairs:
+                for p1, p2 in cross_group_pairs:
+                    pairings.append((p1, p2))
+                    used.add(p1[0])
+                    used.add(p2[0])
+                    print(f"  ✓ {p1[0]} ({p1[1]['wins']}-{p1[1]['losses']}) vs {p2[0]} ({p2[1]['wins']}-{p2[1]['losses']})")
+            else:
+                # Last resort: pair any remaining players
+                print("  ⚠️  Could not find valid cross-group pairings, using fallback")
+                i = 0
+                while i < len(unpaired_players) - 1:
+                    p1 = unpaired_players[i]
+                    p2 = unpaired_players[i + 1]
+                    pairings.append((p1, p2))
+                    used.add(p1[0])
+                    used.add(p2[0])
+                    
+                    if can_pair(p1, p2):
+                        print(f"  ✓ {p1[0]} vs {p2[0]}")
+                    else:
+                        print(f"  ⚠️  FORCED REMATCH: {p1[0]} vs {p2[0]}")
+                    
+                    i += 2
 
     # Final verification
     print(f"\nTotal pairings: {len(pairings)} (expected: {len(standings) // 2})")
@@ -821,10 +902,17 @@ def calculate_swiss_pairings(standings, round_number=None):
     # Reset random seed to avoid affecting other code
     random.seed()
     
-    return pairings
+    return pairings, bye_player
 
-def update_phase_seeding_for_pairings(phase_id, phase_groups, pairings):
-    """Update the seeding in a phase to match our calculated pairings"""
+def update_phase_seeding_for_pairings(phase_id, phase_groups, pairings, bye_player=None):
+    """Update the seeding in a phase to match our calculated pairings
+    
+    Args:
+        phase_id: StartGG phase ID
+        phase_groups: Phase group data from API
+        pairings: List of tuples of ((p1_name, p1_info), (p2_name, p2_info))
+        bye_player: Optional tuple of (player_name, player_info) for player receiving bye
+    """
 
     if not phase_groups or len(phase_groups) == 0:
         print("No phase groups found")
@@ -850,6 +938,12 @@ def update_phase_seeding_for_pairings(phase_id, phase_groups, pairings):
     assigned_positions = set()
 
     print("\nAssigning new positions based on StartGG bracket structure:")
+    
+    # If there's a bye, we need to account for it in position calculations
+    # For odd player count (e.g., 31): positions 1-15, 16=BYE, 17-31
+    # For even player count (e.g., 30): positions 1-15, 16-30
+    has_bye = bye_player is not None
+    bottom_half_start = half_players + (2 if has_bye else 1)
 
     for match_idx, ((p1_name, p1_info), (p2_name, p2_info)) in enumerate(pairings):
         p1_seed_id = seed_id_by_name.get(p1_name)
@@ -859,8 +953,8 @@ def update_phase_seeding_for_pairings(phase_id, phase_groups, pairings):
             print(f"Warning: Could not find seed ID for {p1_name} or {p2_name}")
             continue
 
-        pos1 = match_idx + 1  # Top half
-        pos2 = match_idx + half_players + 1  # Bottom half
+        pos1 = match_idx + 1  # Top half: 1, 2, 3, ...
+        pos2 = match_idx + bottom_half_start  # Bottom half: starts after bye if present
 
         print(
             f"  Match {match_idx + 1}: {p1_name} -> position {pos1}, {p2_name} -> position {pos2}"
@@ -872,12 +966,28 @@ def update_phase_seeding_for_pairings(phase_id, phase_groups, pairings):
         assigned_positions.add(pos1)
         assigned_positions.add(pos2)
 
-    # Handle any unpaired players
+    # Track which players have been assigned
     paired_players = set()
     for (p1_name, _), (p2_name, _) in pairings:
         paired_players.add(p1_name)
         paired_players.add(p2_name)
 
+    # Handle bye player separately - place at middle position (for odd player counts)
+    if bye_player:
+        bye_name, bye_info = bye_player
+        bye_seed_id = seed_id_by_name.get(bye_name)
+        
+        if bye_seed_id:
+            # For odd player counts, bye goes at position half_players + 1 (the middle/bye slot)
+            # For 31 players: half_players = 15, so bye is at position 16
+            # This leaves positions 1-15 for top half, 16 for bye, 17-31 for bottom half
+            bye_position = half_players + 1
+            print(f"\n  BYE: {bye_name} -> position {bye_position} (receives automatic win)")
+            new_seed_mapping.append({"seedId": bye_seed_id, "seedNum": bye_position})
+            assigned_positions.add(bye_position)
+            paired_players.add(bye_name)
+
+    # Handle any other unpaired players (shouldn't happen if bye system works correctly)
     unpaired_players = []
     for seed in current_seeds:
         name = seed["entrant"]["participants"][0]["gamerTag"]
@@ -885,7 +995,7 @@ def update_phase_seeding_for_pairings(phase_id, phase_groups, pairings):
             unpaired_players.append((name, seed["id"]))
 
     if unpaired_players:
-        print(f"\nFound {len(unpaired_players)} unpaired players")
+        print(f"\n⚠️  Found {len(unpaired_players)} additional unpaired players (unexpected)")
 
         all_positions = set(range(1, total_players + 1))
         available_positions = sorted(all_positions - assigned_positions)
@@ -2001,7 +2111,7 @@ def main():
     try:
         if len(sys.argv) < 2:
             print(
-                "Usage: python daness-v2.py <event-slug> [round|bracket|standings|why|recommend]"
+                "Usage: python daness-v2.py <event-slug> [round|bracket|standings|why|setup]"
             )
             print(
                 "Example: python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2"
@@ -2019,45 +2129,64 @@ def main():
                 "         python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2 why <player-name>"
             )
             print(
-                "         python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2 recommend"
+                "         python daness-v2.py tournament/playground-bracket-2/event/ultimate-singles-2 setup 31 13"
             )
             sys.exit(1)
 
         slug = sys.argv[1]
         command = sys.argv[2] if len(sys.argv) > 2 else None
 
-        # Handle recommend command early (doesn't need API call)
-        if command == "recommend":
-            if len(sys.argv) < 4:
-                print("Usage: python daness-v2.py <event-slug> recommend <num-players>")
-                print("Example: python daness-v2.py tournament/event recommend 28")
+        # Handle setup command (tournament setup - required before Round 1)
+        if command == "setup":
+            if len(sys.argv) < 5:
+                print("Usage: python daness_v2.py <event-slug> setup <num-players> <num-setups>")
+                print("Example: python daness_v2.py tournament/event setup 31 13")
                 sys.exit(1)
             
             try:
                 num_players = int(sys.argv[3])
-                recommended_rounds = calculate_recommended_rounds(num_players)
+                num_setups = int(sys.argv[4])
+                recommended_rounds = calculate_recommended_rounds(num_players, num_setups)
                 
-                print(f"\n{'='*60}")
-                print(f"SWISS ROUNDS RECOMMENDATION")
-                print(f"{'='*60}")
-                print(f"\nNumber of players: {num_players}")
-                print(f"Recommended Swiss rounds: {recommended_rounds}")
-                print(f"\nExplanation:")
-                print(f"  - Minimum rounds for Swiss: ceil(log2({num_players})) = {recommended_rounds}")
-                print(f"  - This ensures adequate differentiation between players")
-                print(f"  - Maximum capped at 5 rounds for practical tournament length")
+                # Check if tournament is runnable
+                if recommended_rounds is None:
+                    matches_per_round = num_players // 2
+                    min_setups = matches_per_round // 2
+                    print(f"\n❌ UNRUNNABLE: Too few setups")
+                    print(f"{num_players} players need {matches_per_round} matches/round")
+                    print(f"Minimum {min_setups} setups required, you have {num_setups}")
+                    sys.exit(1)
+                
+                # Calculate shortage and waves
+                import math
+                matches_per_round = num_players // 2
+                shortage = max(0, matches_per_round - num_setups)
+                waves = math.ceil(matches_per_round / num_setups)
+                
+                # Estimate time: 20min per wave
+                time_per_round = 20 * waves
+                estimated_time = recommended_rounds * time_per_round
+                
+                print(f"\n{num_players} players, {num_setups} setups → {recommended_rounds} rounds (~{estimated_time}min)")
+                
+                if shortage > 0:
+                    print(f"Note: {shortage} setup(s) short = {waves} waves per round")
                 
                 # Show expected bracket split
                 main_size = (num_players + 1) // 2
                 redemption_size = num_players - main_size
-                print(f"\nExpected bracket split after {recommended_rounds} rounds:")
-                print(f"  - Main bracket: {main_size} players")
-                print(f"  - Redemption bracket: {redemption_size} players")
+                print(f"Bracket split: {main_size} main / {redemption_size} redemption")
                 
                 return
             except ValueError:
-                print(f"Error: '{sys.argv[3]}' is not a valid number")
+                print(f"Error: Invalid number format")
                 sys.exit(1)
+        
+        # Handle deprecated recommend command
+        if command == "recommend":
+            print("The 'recommend' command has been replaced with 'setup'.")
+            print("Usage: python daness_v2.py <event-slug> setup <num-players> <num-setups>")
+            sys.exit(1)
 
         print(f"Fetching basic event data for: {slug}")
 
@@ -2222,7 +2351,7 @@ def main():
 
         # Calculate pairings
         print("Calculating pairings...")
-        pairings = calculate_swiss_pairings(standings, round_number=target_round)
+        pairings, bye_player = calculate_swiss_pairings(standings, round_number=target_round)
 
         print(f"\nCalculated {len(pairings)} pairings:")
         for i, ((p1_name, p1_info), (p2_name, p2_info)) in enumerate(pairings, 1):
@@ -2230,13 +2359,18 @@ def main():
                 f"  Match {i}: {p1_name} ({p1_info['wins']}-{p1_info['losses']}) vs "
                 + f"{p2_name} ({p2_info['wins']}-{p2_info['losses']})"
             )
+        
+        if bye_player:
+            print(f"\n  BYE: {bye_player[0]} receives automatic win (no match required)")
 
         # Update the phase seeding
         print("Updating phase seeding...")
         if update_phase_seeding_for_pairings(
-            target_phase["id"], target_phase["phaseGroups"]["nodes"], pairings
+            target_phase["id"], target_phase["phaseGroups"]["nodes"], pairings, bye_player
         ):
             print(f"\n✅ Successfully updated Round {target_round} pairings!")
+            if bye_player:
+                print(f"   Note: {bye_player[0]} has a BYE and will automatically advance with a win")
             print("You can now start this phase in StartGG.")
         else:
             print(f"\n❌ Failed to update Round {target_round} pairings")

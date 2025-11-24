@@ -133,7 +133,7 @@ class TournamentTester:
         
         for round_num in range(1, 6):
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             
             # Check for rematches
             rematch_found = False
@@ -169,7 +169,7 @@ class TournamentTester:
         
         for round_num in range(1, 6):
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             
             # Check we get correct number of pairings
             if len(pairings) != 12:
@@ -191,7 +191,7 @@ class TournamentTester:
         
         for round_num in range(1, 5):  # 20 players should have 5 rounds
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             tournament.simulate_round(round_num, pairings)
         
         final_standings = calculate_final_standings_points_based(
@@ -287,7 +287,7 @@ class TournamentTester:
         
         for round_num in range(1, 5):
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             
             # With odd players, we should have (n-1)/2 pairings and 1 unpaired
             expected_pairings = (tournament.num_players - 1) // 2
@@ -315,7 +315,7 @@ class TournamentTester:
         
         for round_num in range(1, 6):
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             
             # Check for rematches
             for (p1_name, p1_info), (p2_name, p2_info) in pairings:
@@ -335,7 +335,7 @@ class TournamentTester:
         
         for round_num in range(1, 6):
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             tournament.simulate_round(round_num, pairings, upset_rate=0.4)
         
         # Check final standings
@@ -356,12 +356,12 @@ class TournamentTester:
         # Simulate 4 rounds
         for round_num in range(1, 5):
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             tournament.simulate_round(round_num, pairings)
         
         # Get round 5 pairings
         standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-        pairings = calculate_swiss_pairings(standings, round_number=5)
+        pairings, _ = calculate_swiss_pairings(standings, round_number=5)
         
         # Check 2-2 pairings
         two_two_matches = []
@@ -388,13 +388,13 @@ class TournamentTester:
         
         # Round 1: Normal
         standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-        pairings = calculate_swiss_pairings(standings, round_number=1)
+        pairings, _ = calculate_swiss_pairings(standings, round_number=1)
         tournament.simulate_round(1, pairings)
         
         # Rounds 2-4: Force some specific results to create constraints
         for round_num in range(2, 5):
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             tournament.simulate_round(round_num, pairings)
         
         # Verify no rematches occurred
@@ -433,7 +433,7 @@ class TournamentTester:
         # Simulate full Swiss
         for round_num in range(1, 6):
             standings = calculate_standings(tournament.initial_seeding, tournament.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             tournament.simulate_round(round_num, pairings)
         
         # Generate bracket seeding
@@ -464,7 +464,7 @@ class TournamentTester:
         # Simulate where all lower seeds win
         for round_num in range(1, 3):
             standings = calculate_standings(tournament_upset.initial_seeding, tournament_upset.match_results)
-            pairings = calculate_swiss_pairings(standings, round_number=round_num)
+            pairings, _ = calculate_swiss_pairings(standings, round_number=round_num)
             
             # Force upsets
             for (p1_name, p1_info), (p2_name, p2_info) in pairings:

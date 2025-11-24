@@ -25,9 +25,9 @@ This is V2 of the [original Daness controller](https://github.com/Tonychen0227/S
 ### Commands
 
 ```bash
-# Recommend Swiss rounds for player count
-python daness_v2.py <event-slug> recommend <num-players>
-# Example: 28 players → 5 rounds, 16 players → 4 rounds
+# Calculate recommended rounds based on setup constraints (run before R1)
+python daness_v2.py <event-slug> setup <num-players> <num-setups>
+# Example: 31 players, 13 setups → 4 rounds (~160min)
 
 # Setup next unstarted round (autodetect)
 python daness_v2.py <event-slug>
@@ -75,11 +75,11 @@ export STARTGG_TOKEN="your_token_here"
 ## Tournament Flow
 
 1. Seed players in Round 1 phase manually
-2. `python daness_v2.py <slug> recommend <count>` - get recommended rounds
+2. `python daness_v2.py <slug> setup <players> <setups>` - calculate recommended rounds
 3. `python daness_v2.py <slug> 1` - setup Round 1 pairings
 4. Start Round 1 in StartGG, complete matches
 5. `python daness_v2.py <slug> 2` - setup Round 2 (uses results from R1)
-6. Repeat for rounds 3-5
+6. Repeat for remaining rounds
 7. `python daness_v2.py <slug> bracket` - generate bracket seeding
 8. Manually seed bracket phases with displayed seeding
 9. Run brackets
